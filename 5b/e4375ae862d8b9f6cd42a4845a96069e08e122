@@ -1,0 +1,24 @@
+src/lib/objects.js
+  h_75d26f28339534 15,19-21,51-55,61,150,165-202
+src/lib/token.js
+  h_75d26f28339534 137
+src/lib/transfer.js
+  h_75d26f28339534 88-117
+src/main.js
+  h_75d26f28339534 30-31,42,52-54,97,108-111
+src/post.js
+  h_75d26f28339534 59,61,66,77-86,94-95
+test/objects.test.js
+  h_75d26f28339534 142-149,330-380
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5be4375ae862d8b9f6cd42a4845a96069e08e122",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
