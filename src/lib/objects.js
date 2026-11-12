@@ -188,10 +188,13 @@ class CacheClient {
    * it downloads, so unpacking overlaps the download. A failed download stops
    * that unpack and the next attempt unpacks again from the start. A failed
    * unpack is thrown at once, without another download.
+   *
+   * `first` (`{ hit }`) is a lookup already done with the login; it replaces
+   * the first lookup call. Later attempts sign again with their own lookup.
    */
-  async restore(tool, name, prefixes, filePath, { extract } = {}) {
+  async restore(tool, name, prefixes, filePath, { extract, first } = {}) {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const hit = (await this.call('lookup', { tool, name, prefixes }))?.hit;
+      const hit = attempt === 1 && first ? first.hit : (await this.call('lookup', { tool, name, prefixes }))?.hit;
       if (!hit) return null;
       const size = await this.fetchHit(hit, filePath, attempt === 3, extract);
       if (size !== null) return { name: hit.name, exact: hit.exact, sizeBytes: size };

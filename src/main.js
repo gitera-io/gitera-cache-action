@@ -18,20 +18,25 @@ const toolsFor = (tools) => (tools === 'none' ? [] : tools === 'auto' ? ['turbo'
 
 const workDir = () => path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'gitera-cache');
 
+/** The compression and the cache space (`folder-<hex>`) for the folder inputs. */
+function folderSpace(folder, ops) {
+  const method = ops.compressionMethod();
+  return { method, tool: ops.folderTool(folder.paths, method) };
+}
+
 /**
  * Folder mode restore, like actions/cache: the exact key, else the newest
  * restore-keys match. Records what it found for the post step's save.
+ * `first` is the lookup result that came back with the login, if any.
  */
-async function restoreFolder(folder, client, ops) {
-  const method = ops.compressionMethod();
-  const tool = ops.folderTool(folder.paths, method);
+async function restoreFolder(folder, client, ops, { tool, method, first }) {
   const state = { tool, method, key: folder.key, exact: false, matched: '' };
   let hit = null;
   const started = Date.now();
 
   try {
     if (folder.lookupOnly) {
-      const found = (await client.call('lookup', { tool, name: folder.key, prefixes: folder.restoreKeys }))?.hit;
+      const found = first ? first.hit : (await client.call('lookup', { tool, name: folder.key, prefixes: folder.restoreKeys }))?.hit;
       if (found) hit = { name: found.name, exact: found.exact, sizeBytes: found.sizeBytes };
     } else {
       fs.mkdirSync(workDir(), { recursive: true });
@@ -39,7 +44,7 @@ async function restoreFolder(folder, client, ops) {
       try {
         // Unpacks while the archive downloads.
         const extract = (input) => ops.extractStream(input, method);
-        hit = await client.restore(tool, folder.key, folder.restoreKeys, archive, { extract });
+        hit = await client.restore(tool, folder.key, folder.restoreKeys, archive, { extract, first });
       } finally {
         fs.rmSync(archive, { force: true });
       }
@@ -92,10 +97,13 @@ async function run({
   core.setOutput('cache-matched-key', '');
 
   const tokens = tokenSourceFor(inputs.apiUrl);
+  // Folder mode asks for its lookup with the login, saving one API call.
+  const space = inputs.folder ? folderSpace(inputs.folder, ops) : null;
+  const lookup = space ? { tool: space.tool, name: inputs.folder.key, prefixes: inputs.folder.restoreKeys } : null;
   let session;
   const connectStarted = Date.now();
   try {
-    session = await tokens.refresh();
+    session = await tokens.refresh(lookup ? { lookup } : {});
   } catch (error) {
     if (!(error instanceof TokenError)) throw error;
     const hint = error.hint ? ` ${error.hint}` : '';
@@ -109,7 +117,7 @@ async function run({
   // save does not trade a second OIDC token. Masked above by onToken.
   if (session.token) core.saveState('token', JSON.stringify({ token: session.token, expiresAt: session.expiresAt }));
 
-  if (inputs.folder) await restoreFolder(inputs.folder, clientFor(inputs.apiUrl, tokens), ops);
+  if (inputs.folder) await restoreFolder(inputs.folder, clientFor(inputs.apiUrl, tokens), ops, { ...space, first: session.lookup });
 
   const tools = toolsFor(inputs.tools);
   if (tools.length > 0) {
