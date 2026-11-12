@@ -1,0 +1,22 @@
+.github/workflows/e2e.yml
+  h_75d26f28339534 27-42,65-105
+README.md
+  h_75d26f28339534 3,61-65
+src/main.js
+  h_75d26f28339534 3,9,11,19-20,22-66,68-69,73,75,89,92,98,103-104,108
+src/post.js
+  h_75d26f28339534 4-5,9-11,28,42-92
+test/main.test.js
+  h_75d26f28339534 138-266
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "84bed4058796c89e12bae4469ca2188e6b481b4f",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
