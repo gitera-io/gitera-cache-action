@@ -1,0 +1,26 @@
+.github/workflows/ci.yml
+  h_75d26f28339534 41-53
+src/lib/objects.js
+  h_75d26f28339534 1-226
+src/lib/retry.js
+  h_75d26f28339534 1-46
+src/lib/token.js
+  h_75d26f28339534 17-18,62,64-68
+src/lib/transfer.js
+  h_75d26f28339534 1-88
+test/live/roundtrip.js
+  h_75d26f28339534 1-61
+test/objects.test.js
+  h_75d26f28339534 1-261
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d93b5b8662968a2d87d08073e642049806c51353",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
