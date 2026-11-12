@@ -1,0 +1,226 @@
+'use strict';
+
+/**
+ * Client for the Gitera object API (POST <api-url>/api/v1/cache/objects/*).
+ *
+ * The API only signs URLs; bytes go straight between the runner and the
+ * bucket. Keys sent to the API are SHA-256 hex digests of the caller's key
+ * (a Turbo hash, an Nx hash, or a folder cache key), built by `cacheKey`.
+ */
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+
+const { withRetry, NetworkError, defaultSleep } = require('./retry');
+const { putFile, getToFile } = require('./transfer');
+
+const MAX_LOOKUP_KEYS = 100;
+const PART_CONCURRENCY = 4;
+const URL_REFRESH_MS = 45 * 1000;
+const REQUEST_TIMEOUT_MS = 30 * 1000;
+
+class CacheApiError extends Error {
+  constructor(message, code, status) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
+}
+
+/** SHA-256 hex of a caller key, namespaced by tool so tools never collide. */
+function cacheKey(tool, key) {
+  return crypto.createHash('sha256').update(`${tool}\0${key}`).digest('hex');
+}
+
+async function readJson(response) {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+class CacheClient {
+  /**
+   * @param {string} apiUrl  Gitera origin
+   * @param {{ get(): Promise<string>, refresh(): Promise<unknown> }} tokens
+   */
+  constructor(apiUrl, tokens, { fetch = globalThis.fetch, sleep = defaultSleep, transfer = { putFile, getToFile } } = {}) {
+    this.apiUrl = apiUrl;
+    this.tokens = tokens;
+    this.fetch = fetch;
+    this.sleep = sleep;
+    this.transfer = transfer;
+  }
+
+  /** One API call: retries temporary failures, and a 401 once with a fresh token. */
+  async call(action, body) {
+    for (let auth = 0; auth < 2; auth += 1) {
+      const token = await this.tokens.get();
+      let response;
+      try {
+        response = await withRetry(
+          `Gitera ${action}`,
+          () =>
+            this.fetch(`${this.apiUrl}/api/v1/cache/objects/${action}`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            }),
+          { sleep: this.sleep }
+        );
+      } catch (error) {
+        if (error instanceof NetworkError) throw new CacheApiError(error.message, 'network');
+        throw error;
+      }
+      const json = await readJson(response);
+      if (response.ok) return json;
+      const code = typeof json?.code === 'string' ? json.code : `http_${response.status}`;
+      if (response.status === 401 && auth === 0) {
+        await this.tokens.refresh();
+        continue;
+      }
+      throw new CacheApiError(typeof json?.error === 'string' ? json.error : `Gitera answered ${response.status}`, code, response.status);
+    }
+    throw new CacheApiError('Gitera refused the cache token', 'invalid_token', 401);
+  }
+
+  /** Looks up keys (any number; sent in batches of 100). Returns a Map of key -> hit. */
+  async lookup(tool, keys) {
+    const hits = new Map();
+    const unique = [...new Set(keys)];
+    for (let i = 0; i < unique.length; i += MAX_LOOKUP_KEYS) {
+      const result = await this.call('lookup', { tool, keys: unique.slice(i, i + MAX_LOOKUP_KEYS) });
+      for (const hit of result?.hits ?? []) hits.set(hit.key, hit);
+    }
+    return hits;
+  }
+
+  /**
+   * Downloads one object into `filePath`. Returns its size, or null on a miss.
+   * A URL that expired or failed is signed again with a new lookup.
+   */
+  async download(tool, key, filePath) {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const hit = (await this.lookup(tool, [key])).get(key);
+      if (!hit) return null;
+      let result;
+      try {
+        result = await withRetry('Bucket download', () => this.transfer.getToFile(hit.url, filePath), { sleep: this.sleep });
+      } catch (error) {
+        if (attempt === 3) throw new CacheApiError(error.message, 'network');
+        continue;
+      }
+      if (result.status === 200 && result.bytes === hit.sizeBytes) return hit.sizeBytes;
+      if (result.status === 404) return null;
+      if (attempt === 3) {
+        throw new CacheApiError(`Bucket download answered ${result.status} (${result.bytes} of ${hit.sizeBytes} bytes)`, 'download_failed', result.status);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Uploads `filePath` under `key`. Returns `committed`, `exists` (already
+   * stored) or `in_progress` (another run is uploading it). On a failure the
+   * reservation is aborted, best effort, and the error is thrown.
+   */
+  async upload(tool, key, filePath) {
+    const sizeBytes = fs.statSync(filePath).size;
+    if (sizeBytes === 0) throw new CacheApiError('Refusing to store an empty object', 'empty_object');
+    const start = await this.call('uploads', { tool, key, sizeBytes });
+    if (start.status === 'exists' || start.status === 'in_progress') return start.status;
+
+    try {
+      let parts;
+      if (start.status === 'upload') await this.putSingle(tool, key, filePath, sizeBytes, start);
+      else if (start.status === 'multipart') parts = await this.putParts(tool, key, filePath, sizeBytes, start);
+      else throw new CacheApiError(`Unexpected upload status ${start.status}`, 'bad_response');
+      const done = await this.call('commit', parts ? { tool, key, parts } : { tool, key });
+      return done.status;
+    } catch (error) {
+      await this.call('abort', { tool, key }).catch(() => {});
+      throw error;
+    }
+  }
+
+  async putSingle(tool, key, filePath, sizeBytes, signed) {
+    let current = signed;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      let result;
+      try {
+        result = await withRetry(
+          'Bucket upload',
+          () => this.transfer.putFile(current.url, { filePath, length: sizeBytes, headers: current.headers ?? {} }),
+          { sleep: this.sleep }
+        );
+      } catch (error) {
+        if (attempt === 3) throw new CacheApiError(error.message, 'network');
+        current = await this.call('uploads', { tool, key, sizeBytes });
+        continue;
+      }
+      // 412: our own earlier attempt already stored the bytes (create-only URL).
+      if (result.status === 200 || result.status === 412) return;
+      if (attempt === 3) throw new CacheApiError(`Bucket upload answered ${result.status}`, 'upload_failed', result.status);
+      // An expired URL (403) or similar: the same run gets fresh URLs for its own reservation.
+      current = await this.call('uploads', { tool, key, sizeBytes });
+      if (current.status !== 'upload') throw new CacheApiError(`Upload restarted as ${current.status}`, 'upload_failed');
+    }
+  }
+
+  async putParts(tool, key, filePath, sizeBytes, start) {
+    const { partSizeBytes, partCount } = start;
+    // Signed part URLs live 60 s, so sign just before use and re-sign after 45 s.
+    const now = () => Date.now();
+    const urls = new Map(start.parts.map((p) => [p.partNumber, { url: p.url, at: now() }]));
+    const etags = new Map();
+    const sizeOf = (n) => (n === partCount ? sizeBytes - partSizeBytes * (partCount - 1) : partSizeBytes);
+    const fresh = (n) => urls.has(n) && now() - urls.get(n).at < URL_REFRESH_MS;
+
+    const sign = async (numbers) => {
+      const result = await this.call('parts', { tool, key, partNumbers: numbers });
+      for (const p of result.parts) urls.set(p.partNumber, { url: p.url, at: now() });
+    };
+
+    const pending = Array.from({ length: partCount }, (_, i) => i + 1);
+    let next = 0;
+
+    const sendPart = async (n) => {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        if (!fresh(n)) {
+          // Sign this part and the next few still waiting, in one call.
+          const batch = [n, ...pending.slice(next).filter((m) => !fresh(m))].slice(0, PART_CONCURRENCY * 2);
+          await sign([...new Set(batch)]);
+        }
+        let result;
+        try {
+          result = await withRetry(
+            `Bucket part ${n}`,
+            () => this.transfer.putFile(urls.get(n).url, { filePath, start: (n - 1) * partSizeBytes, length: sizeOf(n) }),
+            { sleep: this.sleep }
+          );
+        } catch {
+          urls.delete(n);
+          continue;
+        }
+        const etag = result.headers?.etag;
+        if (result.status === 200 && etag) return etags.set(n, etag);
+        urls.delete(n); // expired or refused: sign again
+      }
+      throw new CacheApiError(`Bucket part ${n} could not be uploaded`, 'upload_failed');
+    };
+
+    const workers = Array.from({ length: Math.min(PART_CONCURRENCY, partCount) }, async () => {
+      while (next < pending.length) {
+        const n = pending[next];
+        next += 1;
+        await sendPart(n);
+      }
+    });
+    await Promise.all(workers);
+    return pending.map((n) => ({ partNumber: n, etag: etags.get(n) }));
+  }
+}
+
+module.exports = { CacheClient, CacheApiError, cacheKey, MAX_LOOKUP_KEYS };

@@ -38,3 +38,16 @@ jobs:
         run: test "${{ steps.folder.outputs.cache-hit }}" = "false"
       - name: Build-tool mode
         uses: ./
+
+  # Real round trip against app.gitera.io and its bucket.
+  live:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node test/live/roundtrip.js

@@ -14,11 +14,11 @@
  * else is a TokenError with the API's code and a hint for the job log.
  */
 
+const { withRetry: sharedRetry, NetworkError, MAX_ATTEMPTS } = require('./retry');
+
 const AUDIENCE = 'gitera-cache';
 /** Refresh this long before expiry. */
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
-const MAX_ATTEMPTS = 4;
-const MAX_RETRY_DELAY_MS = 30 * 1000;
 const REQUEST_TIMEOUT_MS = 30 * 1000;
 
 const HINTS = {
@@ -51,14 +51,6 @@ class TokenError extends Error {
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function retryDelay(attempt, response) {
-  const header = Number(response?.headers?.get?.('retry-after'));
-  const fromHeader = Number.isFinite(header) && header >= 0 ? header * 1000 : 0;
-  return Math.min(MAX_RETRY_DELAY_MS, Math.max(fromHeader, 500 * 2 ** (attempt - 1)));
-}
-
-const isTemporaryStatus = (status) => status === 429 || status >= 500;
-
 async function readJson(response) {
   try {
     return await response.json();
@@ -67,25 +59,14 @@ async function readJson(response) {
   }
 }
 
-/**
- * Sends one request, retrying network errors and temporary statuses.
- * Returns the final Response; throws TokenError when every attempt failed on the network.
- */
+/** Shared retry rules; a request that never got an answer is a temporary `network` error. */
 async function withRetry(what, send, { sleep }) {
-  let lastError;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    let response;
-    try {
-      response = await send();
-    } catch (error) {
-      lastError = error;
-      if (attempt < MAX_ATTEMPTS) await sleep(retryDelay(attempt));
-      continue;
-    }
-    if (!isTemporaryStatus(response.status) || attempt === MAX_ATTEMPTS) return response;
-    await sleep(retryDelay(attempt, response));
+  try {
+    return await sharedRetry(what, send, { sleep });
+  } catch (error) {
+    if (error instanceof NetworkError) throw new TokenError(error.message, 'network');
+    throw error;
   }
-  throw new TokenError(`${what} failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`, 'network');
 }
 
 /** Reads a GitHub OIDC token for the Gitera audience from the runner. */
