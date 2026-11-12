@@ -1,0 +1,62 @@
+name: E2E
+
+# Two jobs on fresh runners: the first builds a small Turbo and Nx repo and
+# fills the Gitera cache; the second must replay both builds from it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GITERA_E2E_SALT: ${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  write:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: ./
+      - name: Turbo build (miss)
+        working-directory: test/fixtures/turbo
+        run: |
+          npm install --no-audit --no-fund
+          npx turbo run build | tee turbo.log
+          grep -q "BUILD RAN" turbo.log
+      - name: Nx build (miss)
+        working-directory: test/fixtures/nx
+        run: |
+          npm install --no-audit --no-fund
+          npx nx run app:build --skip-nx-cache=false | tee nx.log
+          grep -q "BUILD RAN" nx.log
+
+  read:
+    needs: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: ./
+      - name: Turbo build (remote hit)
+        working-directory: test/fixtures/turbo
+        run: |
+          npm install --no-audit --no-fund
+          npx turbo run build | tee turbo.log
+          grep -q "1 cached, 1 total" turbo.log
+          grep -q "built for ${GITERA_E2E_SALT}" packages/app/dist/out.txt
+      - name: Nx build (remote hit)
+        working-directory: test/fixtures/nx
+        run: |
+          npm install --no-audit --no-fund
+          npx nx run app:build | tee nx.log
+          grep -qi "remote cache" nx.log
+          grep -q "built for ${GITERA_E2E_SALT}" app/dist/out.txt

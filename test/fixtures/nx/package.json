@@ -1,0 +1,7 @@
+{
+  "name": "gitera-cache-nx-fixture",
+  "private": true,
+  "devDependencies": {
+    "nx": "^21.0.0"
+  }
+}
