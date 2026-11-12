@@ -1,6 +1,6 @@
 # Gitera Cache
 
-> Work in progress. This build only checks its inputs; caching is not active yet.
+> Not released yet. Turbo, Nx and folder caching work; `v1` comes after the docs.
 
 A remote build cache for GitHub Actions, stored by Gitera. One step gives you:
 
@@ -58,7 +58,11 @@ steps after it.
 | `cache-hit` | `true` when the exact key was restored. |
 | `cache-matched-key` | The key that was restored. |
 
-The folder is saved at the end of the job, only when the job succeeded.
+The folder is saved at the end of the job, only when the job succeeded, and
+not when the exact key was restored. Files are packed with `tar` (zstd when
+the runner has it, else gzip) and restored to the same absolute paths, so a
+cache only matches jobs with the same `path` list, compression and OS. Linux
+and macOS runners are supported.
 
 ## Permissions
 

@@ -1,9 +1,14 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const core = require('./lib/core');
 const { stopServer } = require('./lib/daemon');
+const folderOps = require('./lib/folder');
+const { CacheClient, cacheKey } = require('./lib/objects');
+const { TokenSource } = require('./lib/token');
 
 const MIB = 1024 * 1024;
 
@@ -20,12 +25,7 @@ function summary(stats) {
   ].join('\n');
 }
 
-/**
- * Post step (runs when the job succeeded, like actions/cache). Waits for the
- * build-tool cache server's uploads, stops it, and writes the job summary.
- * Folder save (P2-5) plugs in here. Never fails the job.
- */
-async function run({ stop = stopServer } = {}) {
+async function stopBuildToolServer(stop) {
   const saved = core.getState('server');
   if (!saved) return;
   const server = JSON.parse(saved);
@@ -37,6 +37,57 @@ async function run({ stop = stopServer } = {}) {
     const tail = fs.readFileSync(server.logFile, 'utf8').trim().split('\n').slice(-5).join('\n');
     core.info(`Gitera Cache server log (last lines):\n${tail}`);
   }
+}
+
+/** Saves the folder cache under its key, unless the exact key was restored. */
+async function saveFolder(clientFor, ops) {
+  const saved = core.getState('folder');
+  const inputs = core.getState('inputs');
+  if (!saved || !inputs) return;
+  const state = JSON.parse(saved);
+  const { folder, apiUrl } = JSON.parse(inputs);
+  if (folder.lookupOnly) return;
+  if (state.exact) return core.info(`Gitera Cache: key ${state.key} was restored exactly, not saving`);
+
+  const paths = ops.resolvePaths(folder.paths);
+  if (paths.length === 0) return core.warning('Gitera Cache: no path matched, nothing saved');
+
+  const dir = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'gitera-cache');
+  fs.mkdirSync(dir, { recursive: true });
+  const archive = path.join(dir, `save-${process.pid}.archive`);
+  try {
+    await ops.createArchive(paths, archive, state.method);
+    const size = fs.statSync(archive).size;
+    const client = clientFor(apiUrl);
+    const result = await client.upload(state.tool, cacheKey(state.tool, state.key), archive, { name: state.key });
+    const sizeText = `${(size / MIB).toFixed(1)} MiB`;
+    if (result === 'committed') core.info(`Gitera Cache: saved key ${state.key} (${sizeText})`);
+    else if (result === 'exists') core.info(`Gitera Cache: key ${state.key} already exists, not saving`);
+    else core.info(`Gitera Cache: another job is saving key ${state.key}`);
+  } catch (error) {
+    core.warning(`Gitera Cache: folder save failed (${error.code ?? 'error'}): ${error.message}`);
+  } finally {
+    fs.rmSync(archive, { force: true });
+  }
+}
+
+/**
+ * Post step (runs when the job succeeded, like actions/cache). Waits for the
+ * build-tool cache server's uploads, stops it, writes the job summary, and
+ * saves the folder cache. Never fails the job.
+ */
+async function run({
+  stop = stopServer,
+  clientFor = (apiUrl) => new CacheClient(apiUrl, new TokenSource(apiUrl, { onToken: (t) => core.setSecret(t.token) })),
+  ops = folderOps,
+} = {}) {
+  if (core.getState('disabled')) return;
+  try {
+    await stopBuildToolServer(stop);
+  } catch (error) {
+    core.warning(`Gitera Cache: stopping the build-tool cache failed: ${error.message}`);
+  }
+  await saveFolder(clientFor, ops);
 }
 
 if (require.main === module) {
