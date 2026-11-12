@@ -1,0 +1,32 @@
+.github/workflows/ci.yml
+  h_75d26f28339534 1-40
+.gitignore
+  h_75d26f28339534 1-3
+README.md
+  h_75d26f28339534 1-71
+action.yml
+  h_75d26f28339534 1-49
+package.json
+  h_75d26f28339534 1-13
+src/lib/core.js
+  h_75d26f28339534 1-79
+src/lib/inputs.js
+  h_75d26f28339534 1-60
+src/main.js
+  h_75d26f28339534 1-34
+src/post.js
+  h_75d26f28339534 1-19
+test/inputs.test.js
+  h_75d26f28339534 1-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cf6dc6fb596b8c64a1eedc53428caf8ca65f0d93",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
