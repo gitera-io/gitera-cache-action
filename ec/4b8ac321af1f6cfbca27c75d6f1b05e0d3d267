@@ -1,0 +1,18 @@
+action.yml
+  h_75d26f28339534 1-2,4-6,9-10
+probe/main.js
+  h_75d26f28339534 1-5
+probe/pre.js
+  h_75d26f28339534 1-12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ec4b8ac321af1f6cfbca27c75d6f1b05e0d3d267",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
