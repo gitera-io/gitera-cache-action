@@ -1,0 +1,20 @@
+src/lib/token.js
+  h_75d26f28339534 1-182
+src/main.js
+  h_75d26f28339534 5,8-10,15,28-39,42-48,51
+test/main.test.js
+  h_75d26f28339534 1-70
+test/token.test.js
+  h_75d26f28339534 1-175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6e78e4c7ebb6a16d040cc5e46af2ef70f4993012",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
