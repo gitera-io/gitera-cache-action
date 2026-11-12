@@ -122,19 +122,53 @@ class CacheClient {
   }
 
   /**
+   * Folder mode, like actions/cache: restores the exact `name`, else the newest
+   * match of the first prefix that matches, into `filePath`. Returns
+   * `{ name, exact, sizeBytes }`, or null on a miss. A failed or expired URL
+   * gets a new lookup.
+   */
+  async restore(tool, name, prefixes, filePath) {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const hit = (await this.call('lookup', { tool, name, prefixes }))?.hit;
+      if (!hit) return null;
+      const size = await this.fetchHit(hit, filePath, attempt === 3);
+      if (size !== null) return { name: hit.name, exact: hit.exact, sizeBytes: size };
+    }
+    return null;
+  }
+
+  /** One download attempt. Returns the size, or null to try again; throws on the last attempt. */
+  async fetchHit(hit, filePath, last) {
+    let result;
+    try {
+      result = await withRetry('Bucket download', () => this.transfer.getToFile(hit.url, filePath), { sleep: this.sleep });
+    } catch (error) {
+      if (last) throw new CacheApiError(error.message, 'network');
+      return null;
+    }
+    if (result.status === 200 && result.bytes === hit.sizeBytes) return hit.sizeBytes;
+    if (last) {
+      throw new CacheApiError(`Bucket download answered ${result.status} (${result.bytes} of ${hit.sizeBytes} bytes)`, 'download_failed', result.status);
+    }
+    return null;
+  }
+
+  /**
    * Uploads `filePath` under `key`. Returns `committed`, `exists` (already
    * stored) or `in_progress` (another run is uploading it). On a failure the
    * reservation is aborted, best effort, and the error is thrown.
+   * `name` (folder mode) stores the readable key; `key` must be cacheKey(tool, name).
    */
-  async upload(tool, key, filePath) {
+  async upload(tool, key, filePath, { name } = {}) {
     const sizeBytes = fs.statSync(filePath).size;
     if (sizeBytes === 0) throw new CacheApiError('Refusing to store an empty object', 'empty_object');
-    const start = await this.call('uploads', { tool, key, sizeBytes });
+    const reserve = name === undefined ? { tool, key, sizeBytes } : { tool, key, sizeBytes, name };
+    const start = await this.call('uploads', reserve);
     if (start.status === 'exists' || start.status === 'in_progress') return start.status;
 
     try {
       let parts;
-      if (start.status === 'upload') await this.putSingle(tool, key, filePath, sizeBytes, start);
+      if (start.status === 'upload') await this.putSingle(reserve, filePath, start);
       else if (start.status === 'multipart') parts = await this.putParts(tool, key, filePath, sizeBytes, start);
       else throw new CacheApiError(`Unexpected upload status ${start.status}`, 'bad_response');
       const done = await this.call('commit', parts ? { tool, key, parts } : { tool, key });
@@ -145,7 +179,8 @@ class CacheClient {
     }
   }
 
-  async putSingle(tool, key, filePath, sizeBytes, signed) {
+  async putSingle(reserve, filePath, signed) {
+    const { sizeBytes } = reserve;
     let current = signed;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       let result;
@@ -157,14 +192,14 @@ class CacheClient {
         );
       } catch (error) {
         if (attempt === 3) throw new CacheApiError(error.message, 'network');
-        current = await this.call('uploads', { tool, key, sizeBytes });
+        current = await this.call('uploads', reserve);
         continue;
       }
       // 412: our own earlier attempt already stored the bytes (create-only URL).
       if (result.status === 200 || result.status === 412) return;
       if (attempt === 3) throw new CacheApiError(`Bucket upload answered ${result.status}`, 'upload_failed', result.status);
       // An expired URL (403) or similar: the same run gets fresh URLs for its own reservation.
-      current = await this.call('uploads', { tool, key, sizeBytes });
+      current = await this.call('uploads', reserve);
       if (current.status !== 'upload') throw new CacheApiError(`Upload restarted as ${current.status}`, 'upload_failed');
     }
   }
