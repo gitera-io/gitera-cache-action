@@ -1,0 +1,20 @@
+src/lib/objects.js
+  h_75d26f28339534 191-193,195,197
+src/main.js
+  h_75d26f28339534 21-26,30,32,39,47,100-102,106,120
+test/main.test.js
+  h_75d26f28339534 211-253
+test/objects.test.js
+  h_75d26f28339534 333-357
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9aaa78bb766ed86f21feb181c43c017882f963a1",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
