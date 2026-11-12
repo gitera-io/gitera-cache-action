@@ -1,0 +1,34 @@
+README.md
+  h_75d26f28339534 67-81
+action.yml
+  h_75d26f28339534 46-47
+src/lib/folder.js
+  h_75d26f28339534 119-121,123-124,127,130,133
+src/lib/prefetch.js
+  h_75d26f28339534 1-144
+src/main.js
+  h_75d26f28339534 12-13,59-103,105-107,122-133,142,146,161-164,166-168,170,172-212
+src/pre.js
+  h_75d26f28339534 1-50
+src/prefetch-process.js
+  h_75d26f28339534 1-102
+test/folder.test.js
+  h_75d26f28339534 11,119-134
+test/main.test.js
+  h_75d26f28339534 269-406
+test/prefetch-process.test.js
+  h_75d26f28339534 1-120
+test/prefetch.test.js
+  h_75d26f28339534 1-125
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "be9db43b0504869bce95b5e4c166345cd620df0f",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
