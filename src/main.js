@@ -28,7 +28,6 @@ async function restoreFolder(folder, client, ops) {
   const state = { tool, method, key: folder.key, exact: false, matched: '' };
   let hit = null;
   const started = Date.now();
-  let downloaded = started;
 
   try {
     if (folder.lookupOnly) {
@@ -38,9 +37,9 @@ async function restoreFolder(folder, client, ops) {
       fs.mkdirSync(workDir(), { recursive: true });
       const archive = path.join(workDir(), `restore-${process.pid}.archive`);
       try {
-        hit = await client.restore(tool, folder.key, folder.restoreKeys, archive);
-        downloaded = Date.now();
-        if (hit) await ops.extractArchive(archive, method);
+        // Unpacks while the archive downloads.
+        const extract = (input) => ops.extractStream(input, method);
+        hit = await client.restore(tool, folder.key, folder.restoreKeys, archive, { extract });
       } finally {
         fs.rmSync(archive, { force: true });
       }
@@ -50,7 +49,7 @@ async function restoreFolder(folder, client, ops) {
     core.warning(`Gitera Cache: folder restore failed (${error.code ?? 'error'}): ${error.message}`);
   }
   if (hit && !folder.lookupOnly) {
-    core.info(`Gitera Cache: lookup and download ${downloaded - started} ms, extract ${Date.now() - downloaded} ms`);
+    core.info(`Gitera Cache: lookup, download and extract ${Date.now() - started} ms`);
   }
 
   if (hit) {

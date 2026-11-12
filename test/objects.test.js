@@ -29,6 +29,8 @@ class Fake {
     this.failNext = {}; // route -> [status...]
     this.token = 'cache-1';
     this.nextId = 1;
+    this.rangeDelay = () => 0;
+    this.rangeSentAt = {};
   }
 
   fail(route, ...statuses) {
@@ -145,7 +147,12 @@ class Fake {
       if (!range) return send(200, obj.bytes);
       const [start, end] = [Number(range[1]), Number(range[2])];
       this.ranges = [...(this.ranges ?? []), [start, end]];
-      return send(206, obj.bytes.subarray(start, end + 1), { 'content-range': `bytes ${start}-${end}/${obj.bytes.length}` });
+      const reply = () => {
+        this.rangeSentAt[start] = Date.now();
+        send(206, obj.bytes.subarray(start, end + 1), { 'content-range': `bytes ${start}-${end}/${obj.bytes.length}` });
+      };
+      const delay = this.rangeDelay(start);
+      return delay ? setTimeout(reply, delay) : reply();
     }
     if (part) {
       const etag = `"${crypto.createHash('md5').update(raw).digest('hex')}"`;
@@ -362,6 +369,84 @@ describe('parallel downloads', () => {
     const out = path.join(dir, 'out');
     assert.equal((await big().restore(tool, 'f', [], out)).sizeBytes, 3000);
     assert.deepEqual(fs.readFileSync(out), fs.readFileSync(src));
+  });
+});
+
+describe('unpack while downloading', () => {
+  const tool = 'folder-0123456789abcdef';
+  const big = () => new CacheClient(fake.base, tokens(), { sleep: async () => {}, rangeBytes: 1000 });
+  /** An `extract` hook that keeps every byte it is given, per call. */
+  const collector = () => {
+    const runs = [];
+    const extract = async (input) => {
+      const run = { chunks: [], firstAt: null };
+      runs.push(run);
+      for await (const chunk of input) {
+        run.firstAt ??= Date.now();
+        run.chunks.push(chunk);
+      }
+    };
+    return { runs, extract, bytes: (i = runs.length - 1) => Buffer.concat(runs[i].chunks) };
+  };
+
+  it('hands the bytes over in order while later ranges are still downloading', async () => {
+    fake.multipartAbove = 1e9;
+    const src = file(4500);
+    await big().upload(tool, cacheKey(tool, 'r'), src, { name: 'r' });
+    fake.rangeDelay = (start) => (start === 4000 ? 300 : 0);
+    const sink = collector();
+    const result = await big().restore(tool, 'r', [], path.join(dir, 'out'), { extract: sink.extract });
+    assert.deepEqual(result, { name: 'r', exact: true, sizeBytes: 4500 });
+    assert.equal(sink.runs.length, 1);
+    assert.deepEqual(sink.bytes(), fs.readFileSync(src));
+    assert.ok(sink.runs[0].firstAt < fake.rangeSentAt[4000], 'unpacking started before the last range arrived');
+  });
+
+  it('hands a small object over after its one GET', async () => {
+    const src = file(500);
+    await big().upload(tool, cacheKey(tool, 's'), src, { name: 's' });
+    const sink = collector();
+    await big().restore(tool, 's', [], path.join(dir, 'out'), { extract: sink.extract });
+    assert.deepEqual(sink.bytes(), fs.readFileSync(src));
+  });
+
+  it('unpacks again from the start when a range fails', async () => {
+    fake.multipartAbove = 1e9;
+    const src = file(3000);
+    await big().upload(tool, cacheKey(tool, 'f'), src, { name: 'f' });
+    fake.fail('bucket-GET', 403);
+    const sink = collector();
+    const extract = (input) => sink.extract(input).catch(() => {});
+    assert.equal((await big().restore(tool, 'f', [], path.join(dir, 'out'), { extract })).sizeBytes, 3000);
+    assert.equal(sink.runs.length, 2);
+    assert.deepEqual(sink.bytes(1), fs.readFileSync(src));
+  });
+
+  it('fails without retrying when unpacking itself fails', async () => {
+    fake.multipartAbove = 1e9;
+    await big().upload(tool, cacheKey(tool, 'x'), file(3000), { name: 'x' });
+    const extract = async (input) => {
+      input.destroy();
+      throw new Error('tar exited 2: disk full');
+    };
+    await assert.rejects(big().restore(tool, 'x', [], path.join(dir, 'out'), { extract }), /disk full/);
+    assert.equal(fake.calls.filter((c) => c.route === 'lookup').length, 1);
+  });
+
+  it('retries the download when a range and the unpack both fail', async () => {
+    fake.multipartAbove = 1e9;
+    const src = file(3000);
+    await big().upload(tool, cacheKey(tool, 'y'), src, { name: 'y' });
+    fake.fail('bucket-GET', 403);
+    let calls = 0;
+    const sink = collector();
+    const extract = async (input) => {
+      calls += 1;
+      if (calls === 1) throw new Error('stopped early');
+      return sink.extract(input);
+    };
+    assert.equal((await big().restore(tool, 'y', [], path.join(dir, 'out'), { extract })).sizeBytes, 3000);
+    assert.deepEqual(sink.bytes(), fs.readFileSync(src));
   });
 });
 

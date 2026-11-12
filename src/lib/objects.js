@@ -10,17 +10,66 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const { Readable } = require('node:stream');
 
 const { withRetry, NetworkError, defaultSleep } = require('./retry');
 const { putFile, getToFile, getRangeToFile } = require('./transfer');
 
 const MAX_LOOKUP_KEYS = 100;
 const PART_CONCURRENCY = 4;
-/** Objects above this are downloaded as parallel byte ranges of this size. */
-const RANGE_BYTES = 16 * 1024 * 1024;
+/**
+ * Objects above this are downloaded as parallel byte ranges of this size.
+ * Small ranges let an unpack follow the download closely: 8 at a time of
+ * 4 MiB keeps it at most about 32 MiB behind.
+ */
+const RANGE_BYTES = 4 * 1024 * 1024;
 const RANGE_CONCURRENCY = 8;
 const URL_REFRESH_MS = 45 * 1000;
 const REQUEST_TIMEOUT_MS = 30 * 1000;
+const FOLLOW_CHUNK = 1024 * 1024;
+
+/**
+ * Reads a file that is still being written, up to the `ready` offset, and
+ * waits for `advance()` to move it. Ends at `size`.
+ */
+class FileFollower extends Readable {
+  constructor(filePath, size) {
+    super({ highWaterMark: FOLLOW_CHUNK });
+    this.fd = fs.openSync(filePath, 'r');
+    this.size = size;
+    this.pos = 0;
+    this.ready = 0;
+    this.waiting = false;
+  }
+
+  advance(ready) {
+    this.ready = ready;
+    if (this.waiting) {
+      this.waiting = false;
+      this._read();
+    }
+  }
+
+  _read() {
+    if (this.pos >= this.size) return this.push(null);
+    if (this.pos >= this.ready) {
+      this.waiting = true;
+      return undefined;
+    }
+    const length = Math.min(FOLLOW_CHUNK, this.ready - this.pos);
+    const buffer = Buffer.allocUnsafe(length);
+    fs.read(this.fd, buffer, 0, length, this.pos, (error, bytes) => {
+      if (error) return this.destroy(error);
+      this.pos += bytes;
+      return this.push(buffer.subarray(0, bytes));
+    });
+    return undefined;
+  }
+
+  _destroy(error, callback) {
+    fs.close(this.fd, () => callback(error));
+  }
+}
 
 class CacheApiError extends Error {
   constructor(message, code, status) {
@@ -134,20 +183,25 @@ class CacheClient {
    * match of the first prefix that matches, into `filePath`. Returns
    * `{ name, exact, sizeBytes }`, or null on a miss. A failed or expired URL
    * gets a new lookup.
+   *
+   * With `extract(readable)`, the archive is also handed to it in order while
+   * it downloads, so unpacking overlaps the download. A failed download stops
+   * that unpack and the next attempt unpacks again from the start. A failed
+   * unpack is thrown at once, without another download.
    */
-  async restore(tool, name, prefixes, filePath) {
+  async restore(tool, name, prefixes, filePath, { extract } = {}) {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const hit = (await this.call('lookup', { tool, name, prefixes }))?.hit;
       if (!hit) return null;
-      const size = await this.fetchHit(hit, filePath, attempt === 3);
+      const size = await this.fetchHit(hit, filePath, attempt === 3, extract);
       if (size !== null) return { name: hit.name, exact: hit.exact, sizeBytes: size };
     }
     return null;
   }
 
   /** One download attempt. Returns the size, or null to try again; throws on the last attempt. */
-  async fetchHit(hit, filePath, last) {
-    if (hit.sizeBytes > this.rangeBytes) return this.fetchRanges(hit, filePath, last);
+  async fetchHit(hit, filePath, last, extract) {
+    if (hit.sizeBytes > this.rangeBytes) return this.fetchRanges(hit, filePath, last, extract);
     let result;
     try {
       result = await withRetry('Bucket download', () => this.transfer.getToFile(hit.url, filePath), { sleep: this.sleep });
@@ -155,7 +209,10 @@ class CacheClient {
       if (last) throw new CacheApiError(error.message, 'network');
       return null;
     }
-    if (result.status === 200 && result.bytes === hit.sizeBytes) return hit.sizeBytes;
+    if (result.status === 200 && result.bytes === hit.sizeBytes) {
+      if (extract) await extract(fs.createReadStream(filePath));
+      return hit.sizeBytes;
+    }
     if (last) {
       throw new CacheApiError(`Bucket download answered ${result.status} (${result.bytes} of ${hit.sizeBytes} bytes)`, 'download_failed', result.status);
     }
@@ -164,21 +221,38 @@ class CacheClient {
 
   /**
    * Downloads a large object as byte ranges, up to RANGE_CONCURRENCY at once,
-   * each written at its own offset. Any range that fails makes the whole
-   * attempt return null, so the caller signs a fresh URL and tries again.
+   * each written at its own offset. Ranges are taken in order, and `extract`
+   * (if given) reads the file up to the end of the first range not yet done.
+   * Any range that fails makes the whole attempt return null, so the caller
+   * signs a fresh URL and tries again.
    */
-  async fetchRanges(hit, filePath, last) {
+  async fetchRanges(hit, filePath, last, extract) {
     const size = hit.sizeBytes;
     fs.writeFileSync(filePath, '');
     fs.truncateSync(filePath, size);
     const ranges = [];
     for (let start = 0; start < size; start += this.rangeBytes) ranges.push([start, Math.min(size, start + this.rangeBytes) - 1]);
 
+    const done = new Array(ranges.length).fill(false);
+    let ready = 0; // ranges[0..ready) are all on disk
+    const follower = extract ? new FileFollower(filePath, size) : null;
+    // The unpack reports its own errors; this keeps a late one from crashing the step.
+    follower?.on('error', () => {});
+    let unpackError = null;
+    const unpacking = follower
+      ? Promise.resolve()
+          .then(() => extract(follower))
+          .catch((error) => {
+            unpackError = error;
+          })
+      : null;
+
     let failure = null;
     let next = 0;
     const worker = async () => {
-      while (next < ranges.length && !failure) {
-        const [start, end] = ranges[next];
+      while (next < ranges.length && !failure && !unpackError) {
+        const index = next;
+        const [start, end] = ranges[index];
         next += 1;
         try {
           const result = await withRetry(
@@ -188,6 +262,10 @@ class CacheClient {
           );
           if (result.status !== 206 || result.bytes !== end - start + 1) {
             failure = new CacheApiError(`Bucket range answered ${result.status} (${result.bytes} of ${end - start + 1} bytes)`, 'download_failed', result.status);
+          } else {
+            done[index] = true;
+            while (ready < ranges.length && done[ready]) ready += 1;
+            follower?.advance(ready === ranges.length ? size : ranges[ready][0]);
           }
         } catch (error) {
           failure = new CacheApiError(error.message, 'network');
@@ -195,6 +273,11 @@ class CacheClient {
       }
     };
     await Promise.all(Array.from({ length: Math.min(RANGE_CONCURRENCY, ranges.length) }, worker));
+    if (failure && follower) follower.destroy(failure);
+    if (unpacking) await unpacking;
+    follower?.destroy();
+    // A failed download is the cause when both failed: retry it.
+    if (unpackError && !failure) throw unpackError;
     if (!failure) return size;
     if (last) throw failure;
     return null;
