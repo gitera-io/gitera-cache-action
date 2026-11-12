@@ -1,0 +1,9 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "globalEnv": ["GITERA_E2E_SALT"],
+  "tasks": {
+    "build": {
+      "outputs": ["dist/**"]
+    }
+  }
+}

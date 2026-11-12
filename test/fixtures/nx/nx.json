@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", { "env": "GITERA_E2E_SALT" }]
+  },
+  "targetDefaults": {
+    "build": {
+      "cache": true,
+      "inputs": ["default"],
+      "outputs": ["{projectRoot}/dist"]
+    }
+  }
+}
