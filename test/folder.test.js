@@ -4,9 +4,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { PassThrough, Readable } = require('node:stream');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 
-const { resolvePaths, folderTool, createArchive, extractArchive, compressionMethod } = require('../src/lib/folder');
+const { resolvePaths, folderTool, createArchive, extractArchive, extractStream, compressionMethod } = require('../src/lib/folder');
 
 let root;
 let home;
@@ -82,6 +83,36 @@ describe('createArchive and extractArchive', () => {
     const bad = path.join(root, 'bad.gzip');
     fs.writeFileSync(bad, 'not an archive');
     await assert.rejects(extractArchive(bad, 'gzip'));
+  });
+
+  for (const method of ['zstd', 'gzip']) {
+    it(`unpacks from a stream that arrives in small pieces with ${method}`, async (t) => {
+      if (method === 'zstd' && compressionMethod() !== 'zstd') return t.skip('zstd not installed');
+      write(path.join(workspace, 'node_modules/x/index.js'), 'module x'.repeat(5000));
+      const archive = path.join(root, `cache.${method}`);
+      await createArchive(resolvePaths(['node_modules'], { workspace, home }), archive, method);
+      fs.rmSync(path.join(workspace, 'node_modules'), { recursive: true });
+
+      const bytes = fs.readFileSync(archive);
+      const input = Readable.from(
+        (async function* () {
+          for (let i = 0; i < bytes.length; i += 97) {
+            await new Promise((resolve) => setImmediate(resolve));
+            yield bytes.subarray(i, i + 97);
+          }
+        })()
+      );
+      await extractStream(input, method);
+      assert.equal(fs.readFileSync(path.join(workspace, 'node_modules/x/index.js'), 'utf8'), 'module x'.repeat(5000));
+    });
+  }
+
+  it('rejects when the input stream fails, and stops the unpacker', async () => {
+    const input = new PassThrough();
+    const done = extractStream(input, 'gzip');
+    input.write(Buffer.from([0x1f, 0x8b]));
+    input.destroy(new Error('range 3 failed'));
+    await assert.rejects(done, /range 3 failed/);
   });
 
   it('refuses to create an empty archive', async () => {
