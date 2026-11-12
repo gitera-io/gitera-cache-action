@@ -1,6 +1,6 @@
 # Gitera Cache
 
-> Not released yet. Turbo, Nx and folder caching work; `v1` comes after the docs.
+> Full guide: [docs.gitera.io/docs/remote-cache](https://docs.gitera.io/docs/remote-cache). Remote cache is in beta.
 
 A remote build cache for GitHub Actions, stored by Gitera. One step gives you:
 
