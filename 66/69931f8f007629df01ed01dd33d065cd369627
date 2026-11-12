@@ -1,0 +1,22 @@
+README.md
+  h_75d26f28339534 76-77
+src/main.js
+  h_75d26f28339534 71-75,109-119
+src/prefetch-process.js
+  h_75d26f28339534 61-63
+test/main.test.js
+  h_75d26f28339534 381-416
+test/prefetch-process.test.js
+  h_75d26f28339534 93-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6669931f8f007629df01ed01dd33d065cd369627",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
