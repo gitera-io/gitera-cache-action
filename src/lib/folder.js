@@ -1,0 +1,139 @@
+'use strict';
+
+/**
+ * Folder mode: which paths to cache, and the archive that holds them.
+ *
+ * Paths follow actions/cache: one per line, `~` for the home folder, paths
+ * relative to the workspace, globs, and `!pattern` to leave matches out.
+ * The archive is `tar` with absolute paths (`-P`), compressed with zstd when
+ * it is installed, else gzip, so a restore puts files back where they were.
+ *
+ * The tool name sent to Gitera includes a hash of the paths, the compression
+ * and the platform, so caches made with other paths or another OS never mix
+ * (like the "version" actions/cache adds to every key).
+ */
+
+const { spawn, spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+function expand(pattern, { workspace, home }) {
+  const p = pattern.trim();
+  if (p === '~' || p.startsWith('~/')) return path.join(home, p.slice(1));
+  return path.isAbsolute(p) ? p : path.join(workspace, p);
+}
+
+/** Absolute, existing, sorted, de-duplicated paths for the `path` input. */
+function resolvePaths(patterns, { workspace = process.env.GITHUB_WORKSPACE || process.cwd(), home = os.homedir() } = {}) {
+  const include = [];
+  const exclude = [];
+  for (const raw of patterns) {
+    if (!raw.trim()) continue;
+    if (raw.trim().startsWith('!')) exclude.push(raw.trim().slice(1));
+    else include.push(raw);
+  }
+  const excluded = (file) =>
+    exclude.some((pattern) => path.matchesGlob(file, expand(pattern, { workspace, home })) || path.matchesGlob(file, pattern));
+
+  const found = new Set();
+  for (const pattern of include) {
+    const abs = expand(pattern, { workspace, home });
+    if (!/[*?[{]/.test(abs)) {
+      if (fs.existsSync(abs) && !excluded(abs)) found.add(abs);
+      continue;
+    }
+    for (const match of fs.globSync(abs)) {
+      const full = path.resolve(match);
+      if (!excluded(full)) found.add(full);
+    }
+  }
+  return [...found].sort();
+}
+
+/** zstd when the runner has it, else gzip. */
+function compressionMethod() {
+  return spawnSync('zstd', ['--version'], { stdio: 'ignore' }).status === 0 ? 'zstd' : 'gzip';
+}
+
+/** `folder-<16 hex>`: one cache space per path list, compression and platform. */
+function folderTool(patterns, method, platform = process.platform) {
+  const version = crypto
+    .createHash('sha256')
+    .update([...patterns.map((p) => p.trim()), method, platform].join('\n'))
+    .digest('hex');
+  return `folder-${version.slice(0, 16)}`;
+}
+
+/** Writes `paths` into a compressed tar at `archivePath`. */
+async function createArchive(paths, archivePath, method) {
+  if (paths.length === 0) throw new Error('nothing to cache: no path matched');
+  const list = `${archivePath}.files`;
+  // NUL-separated, so names with spaces or newlines are safe.
+  fs.writeFileSync(list, `${paths.join('\0')}\0`);
+  try {
+    const tarArgs = ['--null', '-P', '-c', '-f', '-', '-T', list];
+    const compress = method === 'zstd' ? ['zstd', ['-T0', '-q', '-o', archivePath, '-']] : ['gzip', ['-c']];
+    const out = method === 'zstd' ? null : fs.createWriteStream(archivePath);
+    await new Promise((resolve, reject) => {
+      const tar = spawn('tar', tarArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const packer = spawn(compress[0], compress[1], { stdio: ['pipe', out ? 'pipe' : 'ignore', 'pipe'] });
+      let failed = false;
+      const fail = (error) => {
+        if (!failed) {
+          failed = true;
+          reject(error);
+        }
+      };
+      let tarErr = '';
+      tar.stderr.on('data', (c) => (tarErr += c));
+      packer.stderr.on('data', () => {});
+      tar.stdout.pipe(packer.stdin);
+      if (out) packer.stdout.pipe(out);
+      tar.on('error', fail);
+      packer.on('error', fail);
+      let done = 0;
+      const finish = () => {
+        done += 1;
+        if (done === (out ? 3 : 2) && !failed) resolve();
+      };
+      tar.on('close', (code) => (code === 0 ? finish() : fail(new Error(`tar exited ${code}: ${tarErr.trim().slice(-500)}`))));
+      packer.on('close', (code) => (code === 0 ? finish() : fail(new Error(`${compress[0]} exited ${code}`))));
+      if (out) out.on('finish', finish);
+    });
+  } finally {
+    fs.rmSync(list, { force: true });
+  }
+}
+
+/** Unpacks an archive made by createArchive back to its absolute paths. */
+async function extractArchive(archivePath, method) {
+  const decompress = method === 'zstd' ? ['zstd', ['-d', '-q', '-c', archivePath]] : ['gzip', ['-d', '-c', archivePath]];
+  await new Promise((resolve, reject) => {
+    const unpacker = spawn(decompress[0], decompress[1], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const tar = spawn('tar', ['-P', '-x', '-f', '-'], { cwd: '/', stdio: ['pipe', 'ignore', 'pipe'] });
+    let failed = false;
+    const fail = (error) => {
+      if (!failed) {
+        failed = true;
+        reject(error);
+      }
+    };
+    let errors = '';
+    unpacker.stderr.on('data', (c) => (errors += c));
+    tar.stderr.on('data', (c) => (errors += c));
+    unpacker.stdout.pipe(tar.stdin);
+    unpacker.on('error', fail);
+    tar.on('error', fail);
+    let done = 0;
+    const finish = () => {
+      done += 1;
+      if (done === 2 && !failed) resolve();
+    };
+    unpacker.on('close', (code) => (code === 0 ? finish() : fail(new Error(`${decompress[0]} exited ${code}: ${errors.trim().slice(-500)}`))));
+    tar.on('close', (code) => (code === 0 ? finish() : fail(new Error(`tar exited ${code}: ${errors.trim().slice(-500)}`))));
+  });
+}
+
+module.exports = { resolvePaths, compressionMethod, folderTool, createArchive, extractArchive };

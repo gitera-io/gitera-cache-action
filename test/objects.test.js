@@ -64,6 +64,24 @@ class Fake {
 
     switch (route) {
       case 'lookup': {
+        if (body.name !== undefined) {
+          // Folder mode: exact name, then the newest committed match of each prefix in order.
+          const committed = [...this.objects.entries()].filter(([k, o]) => k.startsWith(`${body.tool}/`) && o.status === 'committed' && o.name);
+          let found = committed.find(([, o]) => o.name === body.name);
+          let exact = Boolean(found);
+          for (const prefix of found ? [] : body.prefixes ?? []) {
+            const matches = committed.filter(([, o]) => o.name.startsWith(prefix)).sort((a, b) => b[1].committedAt - a[1].committedAt);
+            if (matches.length) {
+              found = matches[0];
+              exact = false;
+              break;
+            }
+          }
+          if (!found) return send(200, { hit: null });
+          const [k, o] = found;
+          const key = k.slice(body.tool.length + 1);
+          return send(200, { hit: { key, name: o.name, exact, url: this.url(`/bucket/${o.id}`), expiresAt: '', sizeBytes: o.size, namespace: 'repo' } });
+        }
         const hits = body.keys
           .map((k) => [k, this.objects.get(`${body.tool}/${k}`)])
           .filter(([, o]) => o?.status === 'committed')
@@ -75,6 +93,10 @@ class Fake {
         if (obj && obj.owner !== 'me') return send(200, { status: 'in_progress' });
         const record = obj ?? { status: 'pending', size: body.sizeBytes, bytes: null, upload: null, id: this.nextId++, owner: 'me' };
         record.size = body.sizeBytes;
+        if (body.name !== undefined) {
+          if (cacheKey(body.tool, body.name) !== body.key) return send(400, { code: 'invalid_request' });
+          record.name = body.name;
+        }
         this.objects.set(`${body.tool}/${body.key}`, record);
         if (body.sizeBytes <= this.multipartAbove) {
           return send(200, { status: 'upload', url: this.url(`/bucket/${record.id}`), expiresAt: '', headers: { 'If-None-Match': '*' } });
@@ -98,6 +120,7 @@ class Fake {
         if (!obj.bytes) return send(409, { code: 'upload_missing' });
         if (obj.bytes.length !== obj.size) return send(409, { code: 'size_mismatch' });
         obj.status = 'committed';
+        obj.committedAt = this.nextId++;
         return send(200, { status: 'committed' });
       }
       case 'abort':
@@ -257,5 +280,43 @@ describe('failures', () => {
   it('turns an unreachable API into a network error', async () => {
     const offline = new CacheClient('http://127.0.0.1:1', tokens(), { sleep: async () => {} });
     await assert.rejects(offline.lookup('turbo', [key('a')]), { code: 'network' });
+  });
+});
+
+describe('folder mode: named keys', () => {
+  const tool = 'folder-0123456789abcdef';
+
+  it('uploads with the readable name and restores it exactly', async () => {
+    const src = file(300);
+    assert.equal(await client().upload(tool, cacheKey(tool, 'deps-1'), src, { name: 'deps-1' }), 'committed');
+    const uploads = fake.calls.filter((c) => c.route === 'uploads');
+    assert.ok(uploads.length >= 1);
+
+    const out = path.join(dir, 'out');
+    assert.deepEqual(await client().restore(tool, 'deps-1', ['deps-'], out), { name: 'deps-1', exact: true, sizeBytes: 300 });
+    assert.deepEqual(fs.readFileSync(out), fs.readFileSync(src));
+  });
+
+  it('falls back to the newest prefix match', async () => {
+    await client().upload(tool, cacheKey(tool, 'deps-1'), file(10, 'a'), { name: 'deps-1' });
+    await client().upload(tool, cacheKey(tool, 'deps-2'), file(20, 'b'), { name: 'deps-2' });
+    const out = path.join(dir, 'out');
+    assert.deepEqual(await client().restore(tool, 'deps-3', ['nothing-', 'deps-'], out), { name: 'deps-2', exact: false, sizeBytes: 20 });
+  });
+
+  it('returns null on a miss without touching the bucket', async () => {
+    assert.equal(await client().restore(tool, 'deps-1', ['deps-'], path.join(dir, 'out')), null);
+    assert.ok(!fake.calls.some((c) => c.route.startsWith('bucket')));
+  });
+
+  it('signs again when a download fails', async () => {
+    await client().upload(tool, cacheKey(tool, 'deps-1'), file(10), { name: 'deps-1' });
+    fake.fail('bucket-GET', 403);
+    assert.equal((await client().restore(tool, 'deps-1', [], path.join(dir, 'out'))).sizeBytes, 10);
+    assert.equal(fake.calls.filter((c) => c.route === 'lookup').length, 2);
+  });
+
+  it('a name that does not match the key is refused', async () => {
+    await assert.rejects(client().upload(tool, cacheKey(tool, 'a'), file(10), { name: 'b' }), { code: 'invalid_request' });
   });
 });
