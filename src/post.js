@@ -56,11 +56,14 @@ async function saveFolder(clientFor, ops) {
   fs.mkdirSync(dir, { recursive: true });
   const archive = path.join(dir, `save-${process.pid}.archive`);
   try {
+    const started = Date.now();
     await ops.createArchive(paths, archive, state.method);
+    const packed = Date.now();
     const size = fs.statSync(archive).size;
     const client = clientFor(apiUrl);
     const result = await client.upload(state.tool, cacheKey(state.tool, state.key), archive, { name: state.key });
     const sizeText = `${(size / MIB).toFixed(1)} MiB`;
+    core.info(`Gitera Cache: pack ${packed - started} ms, upload ${Date.now() - packed} ms`);
     if (result === 'committed') core.info(`Gitera Cache: saved key ${state.key} (${sizeText})`);
     else if (result === 'exists') core.info(`Gitera Cache: key ${state.key} already exists, not saving`);
     else core.info(`Gitera Cache: another job is saving key ${state.key}`);
@@ -71,6 +74,16 @@ async function saveFolder(clientFor, ops) {
   }
 }
 
+/** The main step's token, if it still has more than the refresh margin left. */
+function handedOverToken() {
+  try {
+    const saved = JSON.parse(core.getState('token') || 'null');
+    return saved && typeof saved.token === 'string' && Number.isFinite(saved.expiresAt) ? saved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Post step (runs when the job succeeded, like actions/cache). Waits for the
  * build-tool cache server's uploads, stops it, writes the job summary, and
@@ -78,7 +91,8 @@ async function saveFolder(clientFor, ops) {
  */
 async function run({
   stop = stopServer,
-  clientFor = (apiUrl) => new CacheClient(apiUrl, new TokenSource(apiUrl, { onToken: (t) => core.setSecret(t.token) })),
+  clientFor = (apiUrl) =>
+    new CacheClient(apiUrl, new TokenSource(apiUrl, { initial: handedOverToken(), onToken: (t) => core.setSecret(t.token) })),
   ops = folderOps,
 } = {}) {
   if (core.getState('disabled')) return;

@@ -12,10 +12,13 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 
 const { withRetry, NetworkError, defaultSleep } = require('./retry');
-const { putFile, getToFile } = require('./transfer');
+const { putFile, getToFile, getRangeToFile } = require('./transfer');
 
 const MAX_LOOKUP_KEYS = 100;
 const PART_CONCURRENCY = 4;
+/** Objects above this are downloaded as parallel byte ranges of this size. */
+const RANGE_BYTES = 16 * 1024 * 1024;
+const RANGE_CONCURRENCY = 8;
 const URL_REFRESH_MS = 45 * 1000;
 const REQUEST_TIMEOUT_MS = 30 * 1000;
 
@@ -45,12 +48,17 @@ class CacheClient {
    * @param {string} apiUrl  Gitera origin
    * @param {{ get(): Promise<string>, refresh(): Promise<unknown> }} tokens
    */
-  constructor(apiUrl, tokens, { fetch = globalThis.fetch, sleep = defaultSleep, transfer = { putFile, getToFile } } = {}) {
+  constructor(
+    apiUrl,
+    tokens,
+    { fetch = globalThis.fetch, sleep = defaultSleep, transfer = { putFile, getToFile, getRangeToFile }, rangeBytes = RANGE_BYTES } = {}
+  ) {
     this.apiUrl = apiUrl;
     this.tokens = tokens;
     this.fetch = fetch;
     this.sleep = sleep;
     this.transfer = transfer;
+    this.rangeBytes = rangeBytes;
   }
 
   /** One API call: retries temporary failures, and a 401 once with a fresh token. */
@@ -139,6 +147,7 @@ class CacheClient {
 
   /** One download attempt. Returns the size, or null to try again; throws on the last attempt. */
   async fetchHit(hit, filePath, last) {
+    if (hit.sizeBytes > this.rangeBytes) return this.fetchRanges(hit, filePath, last);
     let result;
     try {
       result = await withRetry('Bucket download', () => this.transfer.getToFile(hit.url, filePath), { sleep: this.sleep });
@@ -150,6 +159,44 @@ class CacheClient {
     if (last) {
       throw new CacheApiError(`Bucket download answered ${result.status} (${result.bytes} of ${hit.sizeBytes} bytes)`, 'download_failed', result.status);
     }
+    return null;
+  }
+
+  /**
+   * Downloads a large object as byte ranges, up to RANGE_CONCURRENCY at once,
+   * each written at its own offset. Any range that fails makes the whole
+   * attempt return null, so the caller signs a fresh URL and tries again.
+   */
+  async fetchRanges(hit, filePath, last) {
+    const size = hit.sizeBytes;
+    fs.writeFileSync(filePath, '');
+    fs.truncateSync(filePath, size);
+    const ranges = [];
+    for (let start = 0; start < size; start += this.rangeBytes) ranges.push([start, Math.min(size, start + this.rangeBytes) - 1]);
+
+    let failure = null;
+    let next = 0;
+    const worker = async () => {
+      while (next < ranges.length && !failure) {
+        const [start, end] = ranges[next];
+        next += 1;
+        try {
+          const result = await withRetry(
+            'Bucket range download',
+            () => this.transfer.getRangeToFile(hit.url, filePath, start, end),
+            { sleep: this.sleep }
+          );
+          if (result.status !== 206 || result.bytes !== end - start + 1) {
+            failure = new CacheApiError(`Bucket range answered ${result.status} (${result.bytes} of ${end - start + 1} bytes)`, 'download_failed', result.status);
+          }
+        } catch (error) {
+          failure = new CacheApiError(error.message, 'network');
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(RANGE_CONCURRENCY, ranges.length) }, worker));
+    if (!failure) return size;
+    if (last) throw failure;
     return null;
   }
 

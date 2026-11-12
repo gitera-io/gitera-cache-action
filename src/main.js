@@ -27,6 +27,8 @@ async function restoreFolder(folder, client, ops) {
   const tool = ops.folderTool(folder.paths, method);
   const state = { tool, method, key: folder.key, exact: false, matched: '' };
   let hit = null;
+  const started = Date.now();
+  let downloaded = started;
 
   try {
     if (folder.lookupOnly) {
@@ -37,6 +39,7 @@ async function restoreFolder(folder, client, ops) {
       const archive = path.join(workDir(), `restore-${process.pid}.archive`);
       try {
         hit = await client.restore(tool, folder.key, folder.restoreKeys, archive);
+        downloaded = Date.now();
         if (hit) await ops.extractArchive(archive, method);
       } finally {
         fs.rmSync(archive, { force: true });
@@ -45,6 +48,9 @@ async function restoreFolder(folder, client, ops) {
   } catch (error) {
     hit = null;
     core.warning(`Gitera Cache: folder restore failed (${error.code ?? 'error'}): ${error.message}`);
+  }
+  if (hit && !folder.lookupOnly) {
+    core.info(`Gitera Cache: lookup and download ${downloaded - started} ms, extract ${Date.now() - downloaded} ms`);
   }
 
   if (hit) {
@@ -88,6 +94,7 @@ async function run({
 
   const tokens = tokenSourceFor(inputs.apiUrl);
   let session;
+  const connectStarted = Date.now();
   try {
     session = await tokens.refresh();
   } catch (error) {
@@ -98,7 +105,10 @@ async function run({
     if (inputs.folder?.failOnCacheMiss) core.setFailed(`No cache found for key ${inputs.folder.key}: Gitera Cache is off`);
     return;
   }
-  core.info(`Gitera Cache: connected for ${session.repository ?? 'this repository'}`);
+  core.info(`Gitera Cache: connected for ${session.repository ?? 'this repository'} (${Date.now() - connectStarted} ms)`);
+  // The post step reuses this token while it has more than 5 minutes left, so a
+  // save does not trade a second OIDC token. Masked above by onToken.
+  if (session.token) core.saveState('token', JSON.stringify({ token: session.token, expiresAt: session.expiresAt }));
 
   if (inputs.folder) await restoreFolder(inputs.folder, clientFor(inputs.apiUrl, tokens), ops);
 

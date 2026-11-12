@@ -85,4 +85,33 @@ function getToFile(signedUrl, filePath) {
   });
 }
 
-module.exports = { putFile, getToFile };
+/**
+ * GETs bytes `start`..`end` (inclusive) of a signed URL into `filePath` at the
+ * same offset. The file must exist; ranges of one object can run in parallel.
+ * Resolves `{ status, headers, bytes }`.
+ */
+function getRangeToFile(signedUrl, filePath, start, end) {
+  const url = new URL(signedUrl);
+  return new Promise((resolve, reject) => {
+    const req = clientFor(url).get(url, { timeout: TIMEOUT_MS, headers: { Range: `bytes=${start}-${end}` } }, async (res) => {
+      if (res.statusCode !== 206) {
+        await collect(res);
+        return resolve({ status: res.statusCode, headers: res.headers, bytes: 0 });
+      }
+      let bytes = 0;
+      res.on('data', (chunk) => {
+        bytes += chunk.length;
+      });
+      try {
+        await pipeline(res, fs.createWriteStream(filePath, { flags: 'r+', start }));
+        resolve({ status: res.statusCode, headers: res.headers, bytes });
+      } catch (error) {
+        reject(error);
+      }
+    });
+    req.on('timeout', () => req.destroy(new Error('Download timed out')));
+    req.on('error', reject);
+  });
+}
+
+module.exports = { putFile, getToFile, getRangeToFile };

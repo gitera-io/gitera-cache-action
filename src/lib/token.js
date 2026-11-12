@@ -134,7 +134,7 @@ class TokenSource {
     this.options = options;
     this.now = options.now ?? Date.now;
     this.onToken = options.onToken ?? (() => {});
-    this.current = null;
+    this.current = options.initial && Number.isFinite(options.initial.expiresAt) ? options.initial : null;
     this.pending = null;
   }
 
