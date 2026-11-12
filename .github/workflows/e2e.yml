@@ -24,6 +24,22 @@ jobs:
         with:
           node-version: 24
       - uses: ./
+      - name: Folder cache (save at job end)
+        uses: ./
+        with:
+          path: .e2e-cache
+          key: e2e-folder-${{ env.GITERA_E2E_SALT }}
+          tools: none
+      - name: Make the folder to cache
+        run: |
+          mkdir -p .e2e-cache/sub
+          echo "folder for ${GITERA_E2E_SALT}" > .e2e-cache/sub/data.txt
+          head -c 1048576 /dev/urandom > .e2e-cache/blob.bin
+          sha256sum .e2e-cache/blob.bin | cut -d' ' -f1 > blob.sha
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blob-sha
+          path: blob.sha
       - name: Turbo build (miss)
         working-directory: test/fixtures/turbo
         run: |
@@ -46,6 +62,47 @@ jobs:
         with:
           node-version: 24
       - uses: ./
+      - name: Folder cache, exact key
+        id: exact
+        uses: ./
+        with:
+          path: .e2e-cache
+          key: e2e-folder-${{ env.GITERA_E2E_SALT }}
+          tools: none
+      - uses: actions/download-artifact@v4
+        with:
+          name: blob-sha
+      - name: Check the exact restore
+        run: |
+          test "${{ steps.exact.outputs.cache-hit }}" = "true"
+          test "${{ steps.exact.outputs.cache-matched-key }}" = "e2e-folder-${GITERA_E2E_SALT}"
+          grep -q "folder for ${GITERA_E2E_SALT}" .e2e-cache/sub/data.txt
+          test "$(sha256sum .e2e-cache/blob.bin | cut -d' ' -f1)" = "$(cat blob.sha)"
+          rm -rf .e2e-cache
+      - name: Folder cache, restore-keys match
+        id: partial
+        uses: ./
+        with:
+          path: .e2e-cache
+          key: e2e-folder-${{ env.GITERA_E2E_SALT }}-next
+          restore-keys: |
+            e2e-folder-${{ env.GITERA_E2E_SALT }}
+          tools: none
+      - name: Check the restore-keys restore
+        run: |
+          test "${{ steps.partial.outputs.cache-hit }}" = "false"
+          test "${{ steps.partial.outputs.cache-matched-key }}" = "e2e-folder-${GITERA_E2E_SALT}"
+          grep -q "folder for ${GITERA_E2E_SALT}" .e2e-cache/sub/data.txt
+      - name: Folder cache, miss
+        id: miss
+        uses: ./
+        with:
+          path: .e2e-missing
+          key: e2e-nothing-${{ env.GITERA_E2E_SALT }}
+          lookup-only: true
+          tools: none
+      - name: Check the miss
+        run: test "${{ steps.miss.outputs.cache-hit }}" = "false" && test -z "${{ steps.miss.outputs.cache-matched-key }}"
       - name: Turbo build (remote hit)
         working-directory: test/fixtures/turbo
         run: |
