@@ -108,21 +108,44 @@ async function createArchive(paths, archivePath, method) {
 }
 
 /** Unpacks an archive made by createArchive back to its absolute paths. */
-async function extractArchive(archivePath, method) {
-  const decompress = method === 'zstd' ? ['zstd', ['-d', '-q', '-c', archivePath]] : ['gzip', ['-d', '-c', archivePath]];
-  await new Promise((resolve, reject) => {
-    const unpacker = spawn(decompress[0], decompress[1], { stdio: ['ignore', 'pipe', 'pipe'] });
+function extractArchive(archivePath, method) {
+  return unpack(method, archivePath, null);
+}
+
+/**
+ * Same as extractArchive, but reads the archive from `input` as it arrives,
+ * so unpacking can run while the download is still going. If `input` fails,
+ * the unpackers are stopped and the promise rejects with its error.
+ */
+function extractStream(input, method) {
+  return unpack(method, null, input);
+}
+
+function unpack(method, archivePath, input) {
+  const source = archivePath ? [archivePath] : [];
+  const decompress = method === 'zstd' ? ['zstd', ['-d', '-q', '-c', ...source]] : ['gzip', ['-d', '-c', ...source]];
+  return new Promise((resolve, reject) => {
+    const unpacker = spawn(decompress[0], decompress[1], { stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
     const tar = spawn('tar', ['-P', '-x', '-f', '-'], { cwd: '/', stdio: ['pipe', 'ignore', 'pipe'] });
     let failed = false;
     const fail = (error) => {
       if (!failed) {
         failed = true;
+        unpacker.kill();
+        tar.kill();
         reject(error);
       }
     };
     let errors = '';
     unpacker.stderr.on('data', (c) => (errors += c));
     tar.stderr.on('data', (c) => (errors += c));
+    if (input) {
+      input.on('error', fail);
+      // A child that exits early closes its stdin; its exit code reports why.
+      unpacker.stdin.on('error', () => {});
+      input.pipe(unpacker.stdin);
+    }
+    tar.stdin.on('error', () => {});
     unpacker.stdout.pipe(tar.stdin);
     unpacker.on('error', fail);
     tar.on('error', fail);
@@ -136,4 +159,4 @@ async function extractArchive(archivePath, method) {
   });
 }
 
-module.exports = { resolvePaths, compressionMethod, folderTool, createArchive, extractArchive };
+module.exports = { resolvePaths, compressionMethod, folderTool, createArchive, extractArchive, extractStream };
