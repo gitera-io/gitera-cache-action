@@ -266,6 +266,144 @@ describe('folder mode', () => {
     assert.equal(process.exitCode, undefined);
   });
 
+  describe('with the job-start prefetch', () => {
+    const TOKEN = { token: 'early', expiresAt: Date.now() + 50 * 60_000, repository: 'acme/web' };
+    const TOOL = 'folder-0123456789abcdef';
+    /** A fake prefetch whose wait() hands out the given statuses in turn. */
+    const prefetched = (statuses, calls = []) => ({
+      calls,
+      wait: async (options = {}) => {
+        calls.push(['wait', Boolean(options.until)]);
+        return statuses.length > 1 ? statuses.shift() : statuses[0];
+      },
+      move: (root) => calls.push(['move', root]),
+      discard: () => calls.push(['discard']),
+      stop: () => calls.push(['stop']),
+    });
+    /** A token source that fails if asked to log in, and records what it was given. */
+    const reusing = (seen) => (apiUrl, options = {}) => {
+      seen.push(options);
+      return { refresh: async () => assert.fail('no second login expected') };
+    };
+    const noRestore = (lookups = []) => () => ({
+      call: async (action, body) => {
+        lookups.push(body);
+        return { hit: null };
+      },
+      restore: async () => assert.fail('no download expected'),
+    });
+
+    it('reuses the login done at job start for the build-tool cache', async () => {
+      const seen = [];
+      await run({ tokenSourceFor: reusing(seen), start: fakeStart(), prefetch: prefetched([{ state: 'done', token: TOKEN }]) });
+      assert.deepEqual(seen, [{ initial: TOKEN }]);
+      assert.match(stdout, /::add-mask::early/);
+      assert.match(read('state'), /"token":"early"/);
+    });
+
+    it('logs in itself when the early token is about to expire', async () => {
+      let logins = 0;
+      const tokenSourceFor = () => ({ refresh: async () => (logins += 1) && { token: 't', repository: 'acme/web' } });
+      const stale = { ...TOKEN, expiresAt: Date.now() + 60_000 };
+      await run({ tokenSourceFor, start: fakeStart(), prefetch: prefetched([{ state: 'done', token: stale }]) });
+      assert.equal(logins, 1);
+    });
+
+    it('moves an exact staged match into place with no API call', async () => {
+      folderInputs({ 'INPUT_RESTORE-KEYS': 'deps-linux-' });
+      const p = prefetched([{ state: 'done', token: TOKEN, staged: { root: '/stage', tool: TOOL, name: 'deps-linux-abc', sizeBytes: 9 } }]);
+      const lookups = [];
+      await run({ tokenSourceFor: reusing([]), clientFor: noRestore(lookups), ops: ops(), prefetch: p });
+      assert.deepEqual(lookups, []);
+      assert.deepEqual(p.calls.filter(([c]) => c === 'move'), [['move', '/stage']]);
+      assert.equal(output('cache-hit'), 'true');
+      assert.equal(output('cache-matched-key'), 'deps-linux-abc');
+      assert.match(read('state'), /"exact":true/);
+    });
+
+    it('uses a staged restore-keys match after one lookup confirms it is the best match', async () => {
+      folderInputs();
+      const p = prefetched([
+        { state: 'running', token: TOKEN, speculating: { tool: TOOL, name: 'deps-linux-old', sizeBytes: 9 } },
+        { state: 'done', token: TOKEN, staged: { root: '/stage', tool: TOOL, name: 'deps-linux-old', sizeBytes: 9 } },
+      ]);
+      const lookups = [];
+      const clientFor = () => ({
+        call: async (action, body) => {
+          lookups.push(body);
+          return { hit: { name: 'deps-linux-old', exact: false, url: 'https://bucket/x', sizeBytes: 9 } };
+        },
+        restore: async () => assert.fail('no download expected'),
+      });
+      await run({ tokenSourceFor: reusing([]), clientFor, ops: ops(), prefetch: p });
+      assert.deepEqual(lookups, [{ tool: TOOL, name: 'deps-linux-abc', prefixes: ['deps-linux-'] }]);
+      assert.deepEqual(p.calls.filter(([c]) => c === 'move'), [['move', '/stage']]);
+      assert.equal(output('cache-hit'), 'false');
+      assert.equal(output('cache-matched-key'), 'deps-linux-old');
+    });
+
+    it('stops a prefetch of the wrong object and restores the right one', async () => {
+      folderInputs();
+      const p = prefetched([{ state: 'running', token: TOKEN, speculating: { tool: TOOL, name: 'deps-linux-old', sizeBytes: 9 } }]);
+      const right = { name: 'deps-linux-abc', exact: true, url: 'https://bucket/y', sizeBytes: 5 };
+      let first;
+      const clientFor = () => ({
+        call: async () => ({ hit: right }),
+        restore: async (tool, name, prefixes, file, options) => {
+          first = options.first;
+          return { name: right.name, exact: true, sizeBytes: 5 };
+        },
+      });
+      await run({ tokenSourceFor: reusing([]), clientFor, ops: ops(), prefetch: p });
+      assert.deepEqual(first, { hit: right });
+      assert.ok(p.calls.some(([c]) => c === 'stop'));
+      assert.ok(!p.calls.some(([c]) => c === 'move'));
+      assert.equal(output('cache-hit'), 'true');
+    });
+
+    it('restores normally when the staged object is for other paths', async () => {
+      folderInputs();
+      const p = prefetched([{ state: 'done', token: TOKEN, staged: { root: '/stage', tool: 'folder-ffffffffffffffff', name: 'deps-linux-abc', sizeBytes: 9 } }]);
+      let restored = false;
+      const clientFor = () => ({
+        call: async () => assert.fail('the restore does its own lookup'),
+        restore: async (tool, name, prefixes, file, options) => {
+          restored = true;
+          assert.equal(options.first, undefined);
+          return { name: 'deps-linux-abc', exact: true, sizeBytes: 5 };
+        },
+      });
+      await run({ tokenSourceFor: reusing([]), clientFor, ops: ops(), prefetch: p });
+      assert.equal(restored, true);
+      assert.ok(!p.calls.some(([c]) => c === 'move'));
+    });
+
+    it('cleans up the prefetch in every case', async () => {
+      folderInputs();
+      const p = prefetched([{ state: 'done', token: TOKEN }]);
+      await run({ tokenSourceFor: reusing([]), clientFor: () => ({ restore: async () => null }), ops: ops(), prefetch: p });
+      assert.ok(p.calls.some(([c]) => c === 'discard'));
+    });
+
+    it('falls back to a normal restore when the move fails', async () => {
+      folderInputs();
+      const p = prefetched([{ state: 'done', token: TOKEN, staged: { root: '/stage', tool: TOOL, name: 'deps-linux-abc', sizeBytes: 9 } }]);
+      p.move = () => {
+        throw new Error('EACCES');
+      };
+      let restored = false;
+      const clientFor = () => ({
+        restore: async () => {
+          restored = true;
+          return { name: 'deps-linux-abc', exact: true, sizeBytes: 5 };
+        },
+      });
+      await run({ tokenSourceFor: reusing([]), clientFor, ops: ops(), prefetch: p });
+      assert.equal(restored, true);
+      assert.equal(output('cache-hit'), 'true');
+    });
+  });
+
   describe('post step save', () => {
     const setState = (folderState, folder = { paths: ['node_modules'], key: 'deps-linux-abc', restoreKeys: [], lookupOnly: false }) => {
       process.env.STATE_inputs = JSON.stringify({ folder, tools: 'none', apiUrl: 'https://app.gitera.io' });

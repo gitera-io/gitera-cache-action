@@ -116,17 +116,21 @@ function extractArchive(archivePath, method) {
  * Same as extractArchive, but reads the archive from `input` as it arrives,
  * so unpacking can run while the download is still going. If `input` fails,
  * the unpackers are stopped and the promise rejects with its error.
+ *
+ * With `root`, the absolute paths are unpacked under `root` instead of `/`
+ * (tar drops the leading `/`), so a prefetch can stage them first.
  */
-function extractStream(input, method) {
-  return unpack(method, null, input);
+function extractStream(input, method, { root } = {}) {
+  return unpack(method, null, input, root);
 }
 
-function unpack(method, archivePath, input) {
+function unpack(method, archivePath, input, root) {
   const source = archivePath ? [archivePath] : [];
   const decompress = method === 'zstd' ? ['zstd', ['-d', '-q', '-c', ...source]] : ['gzip', ['-d', '-c', ...source]];
+  const tarArgs = root ? ['-x', '-f', '-'] : ['-P', '-x', '-f', '-'];
   return new Promise((resolve, reject) => {
     const unpacker = spawn(decompress[0], decompress[1], { stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
-    const tar = spawn('tar', ['-P', '-x', '-f', '-'], { cwd: '/', stdio: ['pipe', 'ignore', 'pipe'] });
+    const tar = spawn('tar', tarArgs, { cwd: root ?? '/', stdio: ['pipe', 'ignore', 'pipe'] });
     let failed = false;
     const fail = (error) => {
       if (!failed) {
