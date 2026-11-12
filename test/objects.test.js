@@ -330,6 +330,31 @@ describe('folder mode: named keys', () => {
     assert.equal(fake.calls.filter((c) => c.route === 'lookup').length, 2);
   });
 
+  it('uses a lookup done with the login instead of its own first lookup', async () => {
+    const src = file(10);
+    await client().upload(tool, cacheKey(tool, 'deps-1'), src, { name: 'deps-1' });
+    const { hit } = await client().call('lookup', { tool, name: 'deps-1', prefixes: [] });
+    fake.calls = [];
+    const out = path.join(dir, 'out');
+    assert.deepEqual(await client().restore(tool, 'deps-1', [], out, { first: { hit } }), { name: 'deps-1', exact: true, sizeBytes: 10 });
+    assert.deepEqual(fs.readFileSync(out), fs.readFileSync(src));
+    assert.equal(fake.calls.filter((c) => c.route === 'lookup').length, 0);
+  });
+
+  it('takes a miss from the login lookup without calling the API', async () => {
+    assert.equal(await client().restore(tool, 'deps-1', ['deps-'], path.join(dir, 'out'), { first: { hit: null } }), null);
+    assert.equal(fake.calls.length, 0);
+  });
+
+  it('signs again with its own lookup when the login lookup URL fails', async () => {
+    await client().upload(tool, cacheKey(tool, 'deps-1'), file(10), { name: 'deps-1' });
+    const { hit } = await client().call('lookup', { tool, name: 'deps-1', prefixes: [] });
+    fake.calls = [];
+    fake.fail('bucket-GET', 403);
+    assert.equal((await client().restore(tool, 'deps-1', [], path.join(dir, 'out'), { first: { hit } })).sizeBytes, 10);
+    assert.equal(fake.calls.filter((c) => c.route === 'lookup').length, 1);
+  });
+
   it('a name that does not match the key is refused', async () => {
     await assert.rejects(client().upload(tool, cacheKey(tool, 'a'), file(10), { name: 'b' }), { code: 'invalid_request' });
   });

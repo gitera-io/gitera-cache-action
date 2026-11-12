@@ -208,6 +208,49 @@ describe('folder mode', () => {
     assert.equal(process.exitCode, 1);
   });
 
+  it('asks for the folder lookup with the login and hands its result to the restore', async () => {
+    folderInputs();
+    const asked = [];
+    const hit = { name: 'deps-linux-abc', exact: true, url: 'https://bucket/x', sizeBytes: 7 };
+    const tokenSourceFor = source(async (options) => {
+      asked.push(options);
+      return { token: 't', repository: 'acme/web', lookup: { hit } };
+    });
+    let given;
+    const clientFor = () => ({
+      restore: async (tool, name, prefixes, file, options) => {
+        given = options.first;
+        return { name: hit.name, exact: true, sizeBytes: 7 };
+      },
+    });
+    await run({ tokenSourceFor, clientFor, ops: ops() });
+    assert.deepEqual(asked, [{ lookup: { tool: 'folder-0123456789abcdef', name: 'deps-linux-abc', prefixes: ['deps-linux-'] } }]);
+    assert.deepEqual(given, { hit });
+    assert.equal(output('cache-hit'), 'true');
+  });
+
+  it('uses the login lookup for lookup-only without another call', async () => {
+    folderInputs({ 'INPUT_LOOKUP-ONLY': 'true' });
+    const hit = { name: 'deps-linux-abc', exact: true, url: 'https://bucket/x', sizeBytes: 7 };
+    const tokenSourceFor = source(async () => ({ token: 't', repository: 'acme/web', lookup: { hit } }));
+    const clientFor = () => ({
+      call: async () => assert.fail('no separate lookup expected'),
+    });
+    await run({ tokenSourceFor, clientFor, ops: ops() });
+    assert.equal(output('cache-hit'), 'true');
+  });
+
+  it('sends no lookup with the login when only Turbo or Nx is used', async () => {
+    process.env.INPUT_TOOLS = 'turbo';
+    const asked = [];
+    const tokenSourceFor = source(async (options) => {
+      asked.push(options);
+      return { token: 't', repository: 'acme/web' };
+    });
+    await run({ tokenSourceFor, start: fakeStart() });
+    assert.deepEqual(asked, [{}]);
+  });
+
   it('turns a restore failure into a warning and a miss', async () => {
     folderInputs();
     await run({
