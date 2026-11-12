@@ -1,0 +1,46 @@
+.github/workflows/e2e.yml
+  h_75d26f28339534 1-62
+.gitignore
+  h_75d26f28339534 4-7
+src/lib/daemon.js
+  h_75d26f28339534 1-100
+src/lib/server.js
+  h_75d26f28339534 1-270
+src/main.js
+  h_75d26f28339534 3-5,7,11-15,17-19,24-27,51-75,84
+src/post.js
+  h_75d26f28339534 3-4,6-21,24-26,28-29,31-45,48
+src/server-process.js
+  h_75d26f28339534 1-42
+test/fixtures/nx/app/build.js
+  h_75d26f28339534 1-8
+test/fixtures/nx/app/project.json
+  h_75d26f28339534 1-12
+test/fixtures/nx/nx.json
+  h_75d26f28339534 1-13
+test/fixtures/nx/package.json
+  h_75d26f28339534 1-7
+test/fixtures/turbo/package.json
+  h_75d26f28339534 1-9
+test/fixtures/turbo/packages/app/build.js
+  h_75d26f28339534 1-8
+test/fixtures/turbo/packages/app/package.json
+  h_75d26f28339534 1-8
+test/fixtures/turbo/turbo.json
+  h_75d26f28339534 1-9
+test/main.test.js
+  h_75d26f28339534 9-10,16,22,34,41-45,48-82,86-87,92,95,110-136
+test/server.test.js
+  h_75d26f28339534 1-179
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "65c423f64829e6ca002793f53a8f2dca36502394",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
