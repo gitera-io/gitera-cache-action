@@ -1,0 +1,49 @@
+name: Gitera Cache
+description: Remote build cache for Turbo, Nx and any folder, shared by the branches and pull requests of a repository
+author: Gitera
+branding:
+  icon: database
+  color: blue
+
+inputs:
+  path:
+    description: "Folder mode: files, folders or globs to cache, one per line (like actions/cache). Leave empty to use only the Turbo and Nx remote cache."
+    required: false
+    default: ""
+  key:
+    description: "Folder mode: the exact key to restore and save."
+    required: false
+    default: ""
+  restore-keys:
+    description: "Folder mode: key prefixes to fall back to when the exact key misses, one per line, most specific first."
+    required: false
+    default: ""
+  lookup-only:
+    description: "Folder mode: only check whether the key exists; do not download."
+    required: false
+    default: "false"
+  fail-on-cache-miss:
+    description: "Folder mode: fail the step when no key matches."
+    required: false
+    default: "false"
+  tools:
+    description: "Remote cache server for build tools: auto (Turbo and Nx), turbo, nx, or none."
+    required: false
+    default: auto
+  api-url:
+    description: Gitera API base URL.
+    required: false
+    default: https://app.gitera.io
+
+outputs:
+  cache-hit:
+    description: "Folder mode: true when the exact key was restored."
+  cache-matched-key:
+    description: "Folder mode: the key that was restored (exact or a restore-keys match)."
+
+runs:
+  using: node24
+  main: src/main.js
+  post: src/post.js
+  # Like actions/cache: save the folder cache only when the job got this far without failing.
+  post-if: success()

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm test
+
+  # Runs the action itself, so a broken action.yml or entry point fails CI.
+  self-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Folder mode
+        id: folder
+        uses: ./
+        with:
+          path: |
+            README.md
+          key: ci-${{ github.run_id }}
+          tools: none
+      - name: Check outputs
+        run: test "${{ steps.folder.outputs.cache-hit }}" = "false"
+      - name: Build-tool mode
+        uses: ./
