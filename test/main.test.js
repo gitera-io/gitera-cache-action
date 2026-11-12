@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { Readable } = require('node:stream');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 
 const { run, toolsFor } = require('../src/main');
@@ -149,6 +150,10 @@ describe('folder mode', () => {
     compressionMethod: () => 'zstd',
     folderTool: () => 'folder-0123456789abcdef',
     extractArchive: async (file, method) => calls.push(['extract', method]),
+    extractStream: async (input, method) => {
+      for await (const _ of input);
+      calls.push(['extract-stream', method]);
+    },
     resolvePaths: () => ['/ws/node_modules'],
     createArchive: async (paths, file) => {
       calls.push(['create', paths]);
@@ -156,9 +161,10 @@ describe('folder mode', () => {
     },
   });
   const restoring = (hit) => () => ({
-    restore: async (tool, name, prefixes) => {
+    restore: async (tool, name, prefixes, file, { extract } = {}) => {
       assert.equal(tool, 'folder-0123456789abcdef');
       assert.deepEqual(prefixes, ['deps-linux-']);
+      if (hit && extract) await extract(Readable.from([Buffer.from('archive')]));
       return hit;
     },
     call: async () => ({ hit }),
@@ -172,7 +178,7 @@ describe('folder mode', () => {
     folderInputs();
     const calls = [];
     await run({ tokenSourceFor: connected, clientFor: restoring({ name: 'deps-linux-abc', exact: true, sizeBytes: 1024 }), ops: ops(calls) });
-    assert.deepEqual(calls, [['extract', 'zstd']]);
+    assert.deepEqual(calls, [['extract-stream', 'zstd']]);
     assert.equal(output('cache-hit'), 'true');
     assert.equal(output('cache-matched-key'), 'deps-linux-abc');
     assert.match(read('state'), /"exact":true/);
