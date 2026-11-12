@@ -1,0 +1,16 @@
+src/lib/folder.js
+  h_75d26f28339534 111-128,134-135,142-148,162
+test/folder.test.js
+  h_75d26f28339534 7,10,88-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "698677a7e9bbd872dfbdb82a716ac1cd4e227bf0",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
