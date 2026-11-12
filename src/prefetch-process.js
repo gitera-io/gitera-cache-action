@@ -58,6 +58,9 @@ async function prefetch({
     const session = await tokens.refresh(lookup ? { lookup } : {});
     status.token = { token: session.token, expiresAt: session.expiresAt, repository: session.repository };
     status.loginMs = now() - started;
+    // A miss on the restore-keys prefixes also rules out any key that starts
+    // with one of them; the main step uses this to skip its own lookup.
+    if (speculate && session.lookup && session.lookup.hit === null) status.missed = { tool, prefixes: folder.restoreKeys };
     writeStatus(dir, status);
 
     if (speculate && session.lookup?.hit) {

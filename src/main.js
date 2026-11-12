@@ -68,7 +68,11 @@ async function restoreFolder(folder, client, ops, { tool, method, first }) {
  */
 async function restoreFromPrefetch(folder, client, space, early, prefetch) {
   const candidate = early.staged ?? early.speculating;
-  if (!candidate || candidate.tool !== space.tool) {
+  if (!candidate) {
+    prefetch.stop(early);
+    return { used: false, first: knownMiss(folder, space, early.missed) ? { hit: null } : undefined };
+  }
+  if (candidate.tool !== space.tool) {
     prefetch.stop(early);
     return { used: false };
   }
@@ -100,6 +104,17 @@ async function restoreFromPrefetch(folder, client, space, early, prefetch) {
   core.info(`Gitera Cache: restored in the background at job start (${status.restoreMs ?? '?'} ms), waited ${waited} ms`);
   recordFolder(folder, space, { name: candidate.name, exact: candidate.name === folder.key, sizeBytes: status.staged.sizeBytes });
   return { used: true };
+}
+
+/**
+ * True when the job-start lookup already proves a miss: it found nothing for
+ * the same restore keys in the same cache space, and the key starts with one
+ * of them (so an object stored under the key would have matched).
+ */
+function knownMiss(folder, space, missed) {
+  if (!missed || missed.tool !== space.tool) return false;
+  const same = missed.prefixes.length === folder.restoreKeys.length && missed.prefixes.every((p, i) => p === folder.restoreKeys[i]);
+  return same && folder.restoreKeys.some((prefix) => prefix && folder.key.startsWith(prefix));
 }
 
 /** Sets the outputs and the state for the post step's save. */

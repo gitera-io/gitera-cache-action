@@ -378,6 +378,42 @@ describe('folder mode', () => {
       assert.ok(!p.calls.some(([c]) => c === 'move'));
     });
 
+    it('takes a miss from the job-start lookup without another call when the key starts with a restore key', async () => {
+      folderInputs();
+      const p = prefetched([{ state: 'done', token: TOKEN, missed: { tool: TOOL, prefixes: ['deps-linux-'] } }]);
+      let first = 'unset';
+      const clientFor = () => ({
+        call: async () => assert.fail('no lookup expected'),
+        restore: async (tool, name, prefixes, file, options) => {
+          first = options.first;
+          return null;
+        },
+      });
+      await run({ tokenSourceFor: reusing([]), clientFor, ops: ops(), prefetch: p });
+      assert.deepEqual(first, { hit: null });
+      assert.match(stdout, /no cache found for key deps-linux-abc/);
+    });
+
+    for (const [label, missed, inputs] of [
+      ['the restore keys changed since job start', { tool: TOOL, prefixes: ['deps-'] }, {}],
+      ['the key does not start with a restore key', { tool: TOOL, prefixes: ['deps-linux-'] }, { INPUT_KEY: 'other-abc' }],
+      ['the miss was for other paths', { tool: 'folder-ffffffffffffffff', prefixes: ['deps-linux-'] }, {}],
+    ]) {
+      it(`looks up again when ${label}`, async () => {
+        folderInputs(inputs);
+        const p = prefetched([{ state: 'done', token: TOKEN, missed }]);
+        let first = 'unset';
+        const clientFor = () => ({
+          restore: async (tool, name, prefixes, file, options) => {
+            first = options.first;
+            return null;
+          },
+        });
+        await run({ tokenSourceFor: reusing([]), clientFor, ops: ops(), prefetch: p });
+        assert.equal(first, undefined);
+      });
+    }
+
     it('cleans up the prefetch in every case', async () => {
       folderInputs();
       const p = prefetched([{ state: 'done', token: TOKEN }]);

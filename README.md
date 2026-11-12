@@ -73,6 +73,8 @@ your first steps run. When the action's own step comes:
 
 - If that match is what a restore would pick now (its name is the key, or
   one lookup returns it), its folders are moved into place in a moment.
+- If nothing matched `restore-keys` and the key starts with one of them, the
+  miss is known already and no further call is made.
 - Otherwise the background work is stopped and the restore runs as usual.
 
 `hashFiles()` in `key` is still empty when the job starts, so the background

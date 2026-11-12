@@ -90,6 +90,18 @@ describe('prefetch process', () => {
     assert.equal(status.state, 'done');
   });
 
+  it('records a definite miss with the cache space and prefixes it was for', async () => {
+    Object.assign(process.env, { INPUT_PATH: 'node_modules', INPUT_KEY: 'deps-', 'INPUT_RESTORE-KEYS': 'deps-linux-\ndeps-' });
+    const status = await prefetch({ dir, tokenSourceFor: login([], { lookup: { hit: null } }), ops: ops() });
+    assert.deepEqual(status.missed, { tool: 'folder-0123456789abcdef', prefixes: ['deps-linux-', 'deps-'] });
+  });
+
+  it('claims no miss when the server did not run the lookup', async () => {
+    Object.assign(process.env, { INPUT_PATH: 'node_modules', INPUT_KEY: 'deps-', 'INPUT_RESTORE-KEYS': 'deps-' });
+    const status = await prefetch({ dir, tokenSourceFor: login([]), ops: ops() });
+    assert.equal(status.missed, undefined);
+  });
+
   it('keeps the token when the download fails, and cleans the staging folder', async () => {
     Object.assign(process.env, { INPUT_PATH: 'node_modules', INPUT_KEY: 'deps-', 'INPUT_RESTORE-KEYS': 'deps-' });
     const hit = { name: 'deps-abc', exact: false, url: 'https://bucket/x', sizeBytes: 9 };
