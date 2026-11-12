@@ -139,7 +139,14 @@ class Fake {
     const [, , id, , part] = req.url.split('/');
     const obj = [...this.objects.values()].find((o) => o.id === Number(id));
     if (!obj) return send(404);
-    if (req.method === 'GET') return send(200, obj.bytes);
+    if (req.method === 'GET') {
+      this.gets = (this.gets ?? 0) + 1;
+      const range = /^bytes=(\d+)-(\d+)$/.exec(req.headers.range ?? '');
+      if (!range) return send(200, obj.bytes);
+      const [start, end] = [Number(range[1]), Number(range[2])];
+      this.ranges = [...(this.ranges ?? []), [start, end]];
+      return send(206, obj.bytes.subarray(start, end + 1), { 'content-range': `bytes ${start}-${end}/${obj.bytes.length}` });
+    }
     if (part) {
       const etag = `"${crypto.createHash('md5').update(raw).digest('hex')}"`;
       obj.upload.set(Number(part), { bytes: raw, etag });
@@ -318,5 +325,56 @@ describe('folder mode: named keys', () => {
 
   it('a name that does not match the key is refused', async () => {
     await assert.rejects(client().upload(tool, cacheKey(tool, 'a'), file(10), { name: 'b' }), { code: 'invalid_request' });
+  });
+});
+
+describe('parallel downloads', () => {
+  const tool = 'folder-0123456789abcdef';
+  const big = (size) => new CacheClient(fake.base, tokens(), { sleep: async () => {}, rangeBytes: 1000 });
+
+  it('downloads a large object in byte ranges and reassembles it exactly', async () => {
+    fake.multipartAbove = 1e9; // keep the upload single
+    const src = file(4500);
+    await big().upload(tool, cacheKey(tool, 'r'), src, { name: 'r' });
+    fake.ranges = [];
+    const out = path.join(dir, 'out');
+    assert.deepEqual(await big().restore(tool, 'r', [], out), { name: 'r', exact: true, sizeBytes: 4500 });
+    assert.deepEqual(fs.readFileSync(out), fs.readFileSync(src));
+    assert.deepEqual(
+      fake.ranges.sort((a, b) => a[0] - b[0]),
+      [[0, 999], [1000, 1999], [2000, 2999], [3000, 3999], [4000, 4499]]
+    );
+  });
+
+  it('uses one plain GET for a small object', async () => {
+    const src = file(500);
+    await big().upload(tool, cacheKey(tool, 's'), src, { name: 's' });
+    fake.ranges = [];
+    await big().restore(tool, 's', [], path.join(dir, 'out'));
+    assert.deepEqual(fake.ranges, []);
+  });
+
+  it('signs again when a range fails, and still gets every byte', async () => {
+    fake.multipartAbove = 1e9;
+    const src = file(3000);
+    await big().upload(tool, cacheKey(tool, 'f'), src, { name: 'f' });
+    fake.fail('bucket-GET', 403);
+    const out = path.join(dir, 'out');
+    assert.equal((await big().restore(tool, 'f', [], out)).sizeBytes, 3000);
+    assert.deepEqual(fs.readFileSync(out), fs.readFileSync(src));
+  });
+});
+
+describe('token reuse', () => {
+  it('starts from a token handed over by the main step', async () => {
+    const { TokenSource } = require('../src/lib/token');
+    const reused = new TokenSource('http://127.0.0.1:1', { initial: { token: 'from-main', expiresAt: Date.now() + 30 * 60_000 } });
+    assert.equal(await reused.get(), 'from-main');
+  });
+
+  it('ignores a handed-over token that is about to expire', async () => {
+    const { TokenSource } = require('../src/lib/token');
+    const stale = new TokenSource('http://127.0.0.1:1', { initial: { token: 'old', expiresAt: Date.now() + 60_000 }, env: {}, sleep: async () => {} });
+    await assert.rejects(stale.get(), { code: 'no_id_token' });
   });
 });
