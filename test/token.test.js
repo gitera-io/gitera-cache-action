@@ -13,8 +13,11 @@ let script;
 const seen = [];
 
 before(async () => {
-  server = http.createServer((req, res) => {
-    seen.push({ method: req.method, url: req.url, auth: req.headers.authorization });
+  server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString('utf8');
+    seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body, type: req.headers['content-type'] });
     const route = req.url.startsWith('/oidc') ? 'oidc' : req.url === '/api/v1/cache/token' ? 'exchange' : 'other';
     const next = (script[route] ?? []).shift() ?? { status: 500, body: {} };
     if (next.destroy) return req.socket.destroy();
@@ -128,6 +131,51 @@ describe('exchangeToken', () => {
   it('handles a non-JSON error page', async () => {
     script.exchange = [{ status: 404, body: '<html>nope</html>' }];
     await assert.rejects(exchangeToken(base, 'oidc-1', { sleep: noSleep }), { code: 'http_404' });
+  });
+
+  it('sends no body without a lookup', async () => {
+    script.exchange = [granted()];
+    await exchangeToken(base, 'oidc-1', { sleep: noSleep });
+    assert.equal(seen[0].body, '');
+  });
+
+  it('sends a folder lookup and returns its result with the token', async () => {
+    const hit = { key: 'k', name: 'deps-1', exact: true, url: 'https://bucket/x', sizeBytes: 10 };
+    script.exchange = [{ status: 200, body: { ...granted().body, lookup: { hit } } }];
+    const lookup = { tool: 'folder-0123456789abcdef', name: 'deps-1', prefixes: ['deps-'] };
+    const result = await exchangeToken(base, 'oidc-1', { sleep: noSleep, lookup });
+    assert.deepEqual(JSON.parse(seen[0].body), { lookup });
+    assert.equal(seen[0].type, 'application/json');
+    assert.deepEqual(result.lookup, { hit });
+  });
+
+  it('keeps a lookup miss, and leaves out a missing or malformed lookup result', async () => {
+    const lookup = { tool: 'folder-0123456789abcdef', name: 'deps-1', prefixes: [] };
+    script.exchange = [
+      { status: 200, body: { ...granted().body, lookup: { hit: null } } },
+      granted(),
+      { status: 200, body: { ...granted().body, lookup: { hit: 'nope' } } },
+    ];
+    assert.deepEqual((await exchangeToken(base, 'oidc-1', { sleep: noSleep, lookup })).lookup, { hit: null });
+    assert.equal((await exchangeToken(base, 'oidc-1', { sleep: noSleep, lookup })).lookup, undefined);
+    assert.equal((await exchangeToken(base, 'oidc-1', { sleep: noSleep, lookup })).lookup, undefined);
+  });
+});
+
+describe('TokenSource lookup', () => {
+  it('sends the lookup only with the first login', async () => {
+    let now = Date.now();
+    script.oidc = [{ status: 200, body: { value: 'oidc-1' } }, { status: 200, body: { value: 'oidc-2' } }];
+    script.exchange = [{ status: 200, body: { ...granted().body, lookup: { hit: null } } }, granted('cache-2')];
+    const tokens = new TokenSource(base, { env: env(), sleep: noSleep, now: () => now });
+    const lookup = { tool: 'folder-0123456789abcdef', name: 'deps-1', prefixes: [] };
+    const first = await tokens.refresh({ lookup });
+    assert.deepEqual(first.lookup, { hit: null });
+    now += 3600_000;
+    assert.equal(await tokens.get(), 'cache-2');
+    const exchanges = seen.filter((r) => r.url === '/api/v1/cache/token');
+    assert.deepEqual(JSON.parse(exchanges[0].body), { lookup });
+    assert.equal(exchanges[1].body, '');
   });
 });
 

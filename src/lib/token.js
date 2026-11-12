@@ -94,34 +94,46 @@ async function requestOidcToken({ env = process.env, fetch = globalThis.fetch, s
   return body.value;
 }
 
-/** Trades a GitHub OIDC token for a Gitera cache token. */
-async function exchangeToken(apiUrl, oidcToken, { fetch = globalThis.fetch, sleep = defaultSleep } = {}) {
+/**
+ * Trades a GitHub OIDC token for a Gitera cache token. With `lookup`
+ * (`{ tool, name, prefixes }`), the folder lookup runs in the same call and
+ * its `{ hit }` comes back as `result.lookup`. It is left out when the server
+ * did not run it (an older server, or a failed lookup).
+ */
+async function exchangeToken(apiUrl, oidcToken, { fetch = globalThis.fetch, sleep = defaultSleep, lookup } = {}) {
+  const body = lookup ? JSON.stringify({ lookup }) : undefined;
+  const headers = { Authorization: `Bearer ${oidcToken}`, Accept: 'application/json' };
+  if (body) headers['Content-Type'] = 'application/json';
   const response = await withRetry(
     'Gitera token exchange',
     () =>
       fetch(`${apiUrl}/api/v1/cache/token`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${oidcToken}`, Accept: 'application/json' },
+        headers,
+        body,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       }),
     { sleep }
   );
-  const body = await readJson(response);
+  const json = await readJson(response);
   if (!response.ok) {
-    const code = typeof body?.code === 'string' ? body.code : `http_${response.status}`;
-    const message = typeof body?.error === 'string' ? body.error : `Gitera answered ${response.status}`;
+    const code = typeof json?.code === 'string' ? json.code : `http_${response.status}`;
+    const message = typeof json?.error === 'string' ? json.error : `Gitera answered ${response.status}`;
     throw new TokenError(message, code, response.status);
   }
-  const expiresAt = Date.parse(body?.expiresAt);
-  if (typeof body?.token !== 'string' || !body.token || !Number.isFinite(expiresAt)) {
+  const expiresAt = Date.parse(json?.expiresAt);
+  if (typeof json?.token !== 'string' || !json.token || !Number.isFinite(expiresAt)) {
     throw new TokenError('Gitera answered without a cache token', 'bad_response', response.status);
   }
-  return {
-    token: body.token,
+  const result = {
+    token: json.token,
     expiresAt,
-    organizationId: typeof body.organizationId === 'string' ? body.organizationId : null,
-    repository: typeof body.repository === 'string' ? body.repository : null,
+    organizationId: typeof json.organizationId === 'string' ? json.organizationId : null,
+    repository: typeof json.repository === 'string' ? json.repository : null,
   };
+  const hit = json.lookup?.hit;
+  if (lookup && (hit === null || (hit && typeof hit === 'object' && typeof hit.url === 'string'))) result.lookup = { hit };
+  return result;
 }
 
 /**
@@ -143,12 +155,16 @@ class TokenSource {
     return (await this.refresh()).token;
   }
 
-  /** Forces a new token, for example after the API answered 401. */
-  refresh() {
+  /**
+   * Forces a new token, for example after the API answered 401. `lookup`
+   * (first login only) asks for a folder lookup in the same call; see
+   * exchangeToken. A caller joining a refresh already running gets its result.
+   */
+  refresh({ lookup } = {}) {
     if (!this.pending) {
       this.pending = (async () => {
         const oidc = await requestOidcToken(this.options);
-        const result = await exchangeToken(this.apiUrl, oidc, this.options);
+        const result = await exchangeToken(this.apiUrl, oidc, { ...this.options, lookup });
         this.current = result;
         this.onToken(result);
         return result;
