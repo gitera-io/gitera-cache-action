@@ -64,6 +64,23 @@ the runner has it, else gzip) and restored to the same absolute paths, so a
 cache only matches jobs with the same `path` list, compression and OS. Linux
 and macOS runners are supported.
 
+### Work started at job start
+
+The action has a `pre` step, which runs when the job starts, before checkout.
+It logs in to Gitera in the background, and with `restore-keys` it also
+downloads and unpacks the newest match into a folder in `RUNNER_TEMP` while
+your first steps run. When the action's own step comes:
+
+- If that match is what a restore would pick now (its name is the key, or
+  one lookup returns it), its folders are moved into place in a moment.
+- If nothing matched `restore-keys` and the key starts with one of them, the
+  miss is known already and no further call is made.
+- Otherwise the background work is stopped and the restore runs as usual.
+
+`hashFiles()` in `key` is still empty when the job starts, so the background
+download relies on `restore-keys`. It only uses `RUNNER_TEMP` and never
+touches your workspace before the action's step runs.
+
 ## Permissions
 
 `id-token: write` lets the action prove which repository and run it is.

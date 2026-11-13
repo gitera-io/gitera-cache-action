@@ -9,7 +9,8 @@ const { startServer } = require('./lib/daemon');
 const folderOps = require('./lib/folder');
 const { readInputs, InputError } = require('./lib/inputs');
 const { CacheClient } = require('./lib/objects');
-const { TokenSource, TokenError } = require('./lib/token');
+const { prefetchDir, waitForPrefetch, moveInto, discard, stopPrefetch } = require('./lib/prefetch');
+const { TokenSource, TokenError, REFRESH_MARGIN_MS } = require('./lib/token');
 
 const TURBO_TEAM = 'gitera';
 
@@ -30,7 +31,6 @@ function folderSpace(folder, ops) {
  * `first` is the lookup result that came back with the login, if any.
  */
 async function restoreFolder(folder, client, ops, { tool, method, first }) {
-  const state = { tool, method, key: folder.key, exact: false, matched: '' };
   let hit = null;
   const started = Date.now();
 
@@ -56,7 +56,70 @@ async function restoreFolder(folder, client, ops, { tool, method, first }) {
   if (hit && !folder.lookupOnly) {
     core.info(`Gitera Cache: lookup, download and extract ${Date.now() - started} ms`);
   }
+  recordFolder(folder, { tool, method }, hit);
+}
 
+/**
+ * Folder restore from the job-start prefetch. The prefetch staged the best
+ * restore-keys match it could see before checkout; it is used only when it
+ * is what a restore would pick now: its name is the key, or one lookup
+ * returns the same name. Otherwise the prefetch is stopped and the restore
+ * runs as usual. Returns false when the caller should do a normal restore.
+ */
+async function restoreFromPrefetch(folder, client, space, early, prefetch) {
+  const candidate = early.staged ?? early.speculating;
+  if (!candidate) {
+    prefetch.stop(early);
+    return { used: false, first: knownMiss(folder, space, early.missed) ? { hit: null } : undefined };
+  }
+  if (candidate.tool !== space.tool) {
+    prefetch.stop(early);
+    return { used: false };
+  }
+  let first;
+  if (candidate.name !== folder.key) {
+    let found;
+    try {
+      found = (await client.call('lookup', { tool: space.tool, name: folder.key, prefixes: folder.restoreKeys }))?.hit ?? null;
+    } catch {
+      found = undefined; // the normal restore looks up again
+    }
+    if (!found || found.name !== candidate.name) {
+      prefetch.stop(early);
+      return { used: false, first: found === undefined ? undefined : { hit: found } };
+    }
+    first = { hit: found };
+  }
+
+  const started = Date.now();
+  const status = early.state === 'running' ? await prefetch.wait() : early;
+  if (status?.staged?.name !== candidate.name || status.staged.tool !== space.tool) return { used: false, first };
+  try {
+    prefetch.move(status.staged.root);
+  } catch (error) {
+    core.warning(`Gitera Cache: could not use the restore started at job start (${error.message}); restoring again`);
+    return { used: false };
+  }
+  const waited = Date.now() - started;
+  core.info(`Gitera Cache: restored in the background at job start (${status.restoreMs ?? '?'} ms), waited ${waited} ms`);
+  recordFolder(folder, space, { name: candidate.name, exact: candidate.name === folder.key, sizeBytes: status.staged.sizeBytes });
+  return { used: true };
+}
+
+/**
+ * True when the job-start lookup already proves a miss: it found nothing for
+ * the same restore keys in the same cache space, and the key starts with one
+ * of them (so an object stored under the key would have matched).
+ */
+function knownMiss(folder, space, missed) {
+  if (!missed || missed.tool !== space.tool) return false;
+  const same = missed.prefixes.length === folder.restoreKeys.length && missed.prefixes.every((p, i) => p === folder.restoreKeys[i]);
+  return same && folder.restoreKeys.some((prefix) => prefix && folder.key.startsWith(prefix));
+}
+
+/** Sets the outputs and the state for the post step's save. */
+function recordFolder(folder, { tool, method }, hit) {
+  const state = { tool, method, key: folder.key, exact: false, matched: '' };
   if (hit) {
     state.exact = hit.exact;
     state.matched = hit.name;
@@ -71,6 +134,18 @@ async function restoreFolder(folder, client, ops, { tool, method, first }) {
   core.saveState('folder', JSON.stringify(state));
 }
 
+/** The job-start prefetch on a runner, or null (tests, local runs). */
+function defaultPrefetch() {
+  const dir = prefetchDir();
+  if (!dir) return null;
+  return {
+    wait: (options) => waitForPrefetch(dir, options),
+    move: (root) => moveInto(root, '/'),
+    discard: (status) => discard(dir, status),
+    stop: stopPrefetch,
+  };
+}
+
 /**
  * Main step. Checks the inputs and the connection, restores the folder cache,
  * then starts the local build-tool cache server and points Turbo and Nx at it.
@@ -79,10 +154,11 @@ async function restoreFolder(folder, client, ops, { tool, method, first }) {
  * fail-on-cache-miss) is a warning, and the step still succeeds.
  */
 async function run({
-  tokenSourceFor = (apiUrl) => new TokenSource(apiUrl, { onToken: (t) => core.setSecret(t.token) }),
+  tokenSourceFor = (apiUrl, options = {}) => new TokenSource(apiUrl, { ...options, onToken: (t) => core.setSecret(t.token) }),
   clientFor = (apiUrl, tokens) => new CacheClient(apiUrl, tokens),
   start = startServer,
   ops = folderOps,
+  prefetch = defaultPrefetch(),
 } = {}) {
   let inputs;
   try {
@@ -96,28 +172,59 @@ async function run({
   core.setOutput('cache-hit', 'false');
   core.setOutput('cache-matched-key', '');
 
-  const tokens = tokenSourceFor(inputs.apiUrl);
-  // Folder mode asks for its lookup with the login, saving one API call.
   const space = inputs.folder ? folderSpace(inputs.folder, ops) : null;
-  const lookup = space ? { tool: space.tool, name: inputs.folder.key, prefixes: inputs.folder.restoreKeys } : null;
-  let session;
-  const connectStarted = Date.now();
+  const restoring = inputs.folder && !inputs.folder.lookupOnly;
+  // The pre step started the login (and maybe the restore) at job start. Wait
+  // for the login, and in folder mode until we know what it is downloading.
+  let early = null;
   try {
-    session = await tokens.refresh(lookup ? { lookup } : {});
-  } catch (error) {
-    if (!(error instanceof TokenError)) throw error;
-    const hint = error.hint ? ` ${error.hint}` : '';
-    core.warning(`Gitera Cache is off for this job (${error.code}): ${error.message}.${hint}`);
-    core.saveState('disabled', error.code);
-    if (inputs.folder?.failOnCacheMiss) core.setFailed(`No cache found for key ${inputs.folder.key}: Gitera Cache is off`);
-    return;
+    early = prefetch ? await prefetch.wait({ until: (s) => (restoring ? Boolean(s.speculating) : Boolean(s.token)) }) : null;
+  } catch {
+    early = null;
   }
-  core.info(`Gitera Cache: connected for ${session.repository ?? 'this repository'} (${Date.now() - connectStarted} ms)`);
-  // The post step reuses this token while it has more than 5 minutes left, so a
-  // save does not trade a second OIDC token. Masked above by onToken.
-  if (session.token) core.saveState('token', JSON.stringify({ token: session.token, expiresAt: session.expiresAt }));
+  const reuse = early?.token?.token && early.token.expiresAt - Date.now() > REFRESH_MARGIN_MS ? early.token : null;
 
-  if (inputs.folder) await restoreFolder(inputs.folder, clientFor(inputs.apiUrl, tokens), ops, { ...space, first: session.lookup });
+  try {
+    const tokens = tokenSourceFor(inputs.apiUrl, reuse ? { initial: reuse } : {});
+    let session;
+    if (reuse) {
+      core.setSecret(reuse.token);
+      session = reuse;
+      core.info(`Gitera Cache: connected for ${reuse.repository ?? 'this repository'} at job start (${early.loginMs ?? '?'} ms, in the background)`);
+    } else {
+      // Folder mode asks for its lookup with the login, saving one API call.
+      const lookup = space ? { tool: space.tool, name: inputs.folder.key, prefixes: inputs.folder.restoreKeys } : null;
+      const connectStarted = Date.now();
+      try {
+        session = await tokens.refresh(lookup ? { lookup } : {});
+      } catch (error) {
+        if (!(error instanceof TokenError)) throw error;
+        const hint = error.hint ? ` ${error.hint}` : '';
+        core.warning(`Gitera Cache is off for this job (${error.code}): ${error.message}.${hint}`);
+        core.saveState('disabled', error.code);
+        if (inputs.folder?.failOnCacheMiss) core.setFailed(`No cache found for key ${inputs.folder.key}: Gitera Cache is off`);
+        return;
+      }
+      core.info(`Gitera Cache: connected for ${session.repository ?? 'this repository'} (${Date.now() - connectStarted} ms)`);
+    }
+    // The post step reuses this token while it has more than 5 minutes left, so a
+    // save does not trade a second OIDC token. Masked above (setSecret / onToken).
+    if (session.token) core.saveState('token', JSON.stringify({ token: session.token, expiresAt: session.expiresAt }));
+
+    if (inputs.folder) {
+      const client = clientFor(inputs.apiUrl, tokens);
+      let fromPrefetch = { used: false };
+      if (reuse && restoring) fromPrefetch = await restoreFromPrefetch(inputs.folder, client, space, early, prefetch);
+      if (!fromPrefetch.used) {
+        await restoreFolder(inputs.folder, client, ops, { ...space, first: fromPrefetch.first ?? session.lookup });
+      }
+    }
+  } finally {
+    if (early) {
+      if (early.state === 'running') prefetch.stop(early);
+      prefetch.discard(early);
+    }
+  }
 
   const tools = toolsFor(inputs.tools);
   if (tools.length > 0) {

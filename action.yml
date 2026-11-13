@@ -43,6 +43,8 @@ outputs:
 
 runs:
   using: node24
+  # At job start: log in and, in folder mode, fetch the best restore-keys match in the background.
+  pre: src/pre.js
   main: src/main.js
   post: src/post.js
   # Like actions/cache: save the folder cache only when the job got this far without failing.

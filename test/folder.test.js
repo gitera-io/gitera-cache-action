@@ -8,6 +8,7 @@ const { PassThrough, Readable } = require('node:stream');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 
 const { resolvePaths, folderTool, createArchive, extractArchive, extractStream, compressionMethod } = require('../src/lib/folder');
+const { moveInto } = require('../src/lib/prefetch');
 
 let root;
 let home;
@@ -113,6 +114,22 @@ describe('createArchive and extractArchive', () => {
     input.write(Buffer.from([0x1f, 0x8b]));
     input.destroy(new Error('range 3 failed'));
     await assert.rejects(done, /range 3 failed/);
+  });
+
+  it('stages an archive under a root, and moveInto puts it back in place', async () => {
+    write(path.join(workspace, 'node_modules/x/index.js'), 'module x');
+    const archive = path.join(root, 'cache.gzip');
+    await createArchive(resolvePaths(['node_modules'], { workspace, home }), archive, 'gzip');
+    fs.rmSync(path.join(workspace, 'node_modules'), { recursive: true });
+
+    const staging = path.join(root, 'staging');
+    fs.mkdirSync(staging);
+    await extractStream(fs.createReadStream(archive), 'gzip', { root: staging });
+    assert.equal(fs.existsSync(path.join(workspace, 'node_modules')), false, 'nothing lands in place before the move');
+    assert.equal(fs.readFileSync(path.join(staging, workspace, 'node_modules/x/index.js'), 'utf8'), 'module x');
+
+    moveInto(staging, '/');
+    assert.equal(fs.readFileSync(path.join(workspace, 'node_modules/x/index.js'), 'utf8'), 'module x');
   });
 
   it('refuses to create an empty archive', async () => {
