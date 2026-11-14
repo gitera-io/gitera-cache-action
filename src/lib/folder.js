@@ -54,12 +54,12 @@ function resolvePaths(patterns, { workspace = process.env.GITHUB_WORKSPACE || pr
 
 /**
  * zstd level for saving. Measured on ubuntu-latest (2 cores) with a 462 MB
- * node_modules tar: -3 gives 99 MB in 1.4-2.1 s, -6 gives 90 MB in 2.4-3.2 s,
- * -9 gives 83 MB in 4-5 s. Uploads run at ~27 MB/s and overlap packing, so
- * -6 is the smallest archive that still packs faster than it uploads.
+ * node_modules tar: -3 gives 99 MB in 1.4-2.1 s, -6 gives 90 MB in 2.4-3.2 s
+ * alone. While the same save uploads, -6 packed in 3.1-6.7 s (two cores
+ * shared with the upload) and made the save slower overall, so -3 stays.
  * Restores read any level.
  */
-const ZSTD_LEVEL = 6;
+const ZSTD_LEVEL = 3;
 
 /** zstd when the runner has it, else gzip. */
 function compressionMethod() {
