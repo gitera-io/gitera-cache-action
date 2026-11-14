@@ -1,0 +1,16 @@
+probe/upload-speed.js
+  h_75d26f28339534 1-25
+src/lib/objects.js
+  h_75d26f28339534 19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "05084a24e10dbe6f79b52f8360687ec5303c7257",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
