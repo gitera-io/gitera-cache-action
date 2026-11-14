@@ -52,6 +52,15 @@ function resolvePaths(patterns, { workspace = process.env.GITHUB_WORKSPACE || pr
   return [...found].sort();
 }
 
+/**
+ * zstd level for saving. Measured on ubuntu-latest (2 cores) with a 462 MB
+ * node_modules tar: -3 gives 99 MB in 1.4-2.1 s, -6 gives 90 MB in 2.4-3.2 s,
+ * -9 gives 83 MB in 4-5 s. Uploads run at ~27 MB/s and overlap packing, so
+ * -6 is the smallest archive that still packs faster than it uploads.
+ * Restores read any level.
+ */
+const ZSTD_LEVEL = 6;
+
 /** zstd when the runner has it, else gzip. */
 function compressionMethod() {
   return spawnSync('zstd', ['--version'], { stdio: 'ignore' }).status === 0 ? 'zstd' : 'gzip';
@@ -101,7 +110,7 @@ async function createArchive(paths, archivePath, method) {
   fs.writeFileSync(list, `${paths.join('\0')}\0`);
   try {
     const tarArgs = ['--null', '-P', '-c', '-f', '-', '-T', list];
-    const compress = method === 'zstd' ? ['zstd', ['-T0', '-q', '-o', archivePath, '-']] : ['gzip', ['-c']];
+    const compress = method === 'zstd' ? ['zstd', ['-T0', `-${ZSTD_LEVEL}`, '-q', '-o', archivePath, '-']] : ['gzip', ['-c']];
     const out = method === 'zstd' ? null : fs.createWriteStream(archivePath);
     await new Promise((resolve, reject) => {
       const tar = spawn('tar', tarArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -190,4 +199,4 @@ function unpack(method, archivePath, input, root) {
   });
 }
 
-module.exports = { resolvePaths, compressionMethod, folderTool, createArchive, extractArchive, extractStream, archiveBound };
+module.exports = { resolvePaths, compressionMethod, folderTool, createArchive, extractArchive, extractStream, archiveBound, ZSTD_LEVEL };
