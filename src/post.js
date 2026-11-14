@@ -11,6 +11,8 @@ const { CacheClient, cacheKey } = require('./lib/objects');
 const { TokenSource } = require('./lib/token');
 
 const MIB = 1024 * 1024;
+/** Archives that may be bigger than this upload while they are packed (the server's multipart threshold). */
+const STREAM_ABOVE_BYTES = 32 * MIB;
 
 function summary(stats) {
   const lookups = stats.hits + stats.misses;
@@ -55,21 +57,44 @@ async function saveFolder(clientFor, ops) {
   const dir = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'gitera-cache');
   fs.mkdirSync(dir, { recursive: true });
   const archive = path.join(dir, `save-${process.pid}.archive`);
+  let packing = null;
   try {
     const started = Date.now();
-    await ops.createArchive(paths, archive, state.method);
-    const packed = Date.now();
-    const size = fs.statSync(archive).size;
     const client = clientFor(apiUrl);
-    const result = await client.upload(state.tool, cacheKey(state.tool, state.key), archive, { name: state.key });
-    const sizeText = `${(size / MIB).toFixed(1)} MiB`;
-    core.info(`Gitera Cache: pack ${packed - started} ms, upload ${Date.now() - packed} ms`);
+    const key = cacheKey(state.tool, state.key);
+    const bound = ops.archiveBound ? ops.archiveBound(paths) : 0;
+    let result;
+    let packedAt = null;
+    if (bound > STREAM_ABOVE_BYTES && client.uploadStream) {
+      // Upload parts while tar and zstd are still writing the archive.
+      packing = ops.createArchive(paths, archive, state.method).then(() => {
+        packedAt = Date.now();
+      });
+      try {
+        result = await client.uploadStream(state.tool, key, archive, { name: state.key, maxSizeBytes: bound, packed: packing });
+      } catch (error) {
+        // A server without streaming (400), or a bound over the object limit or the quota.
+        if (![400, 413, 507].includes(error.status) && error.code !== 'too_large') throw error;
+        await packing;
+        result = await client.upload(state.tool, key, archive, { name: state.key });
+      }
+      await packing;
+      core.info(`Gitera Cache: pack and upload ${Date.now() - started} ms (packing ${packedAt - started} ms)`);
+    } else {
+      await ops.createArchive(paths, archive, state.method);
+      const packed = Date.now();
+      result = await client.upload(state.tool, key, archive, { name: state.key });
+      core.info(`Gitera Cache: pack ${packed - started} ms, upload ${Date.now() - packed} ms`);
+    }
+    const sizeText = `${(fs.statSync(archive).size / MIB).toFixed(1)} MiB`;
     if (result === 'committed') core.info(`Gitera Cache: saved key ${state.key} (${sizeText})`);
     else if (result === 'exists') core.info(`Gitera Cache: key ${state.key} already exists, not saving`);
     else core.info(`Gitera Cache: another job is saving key ${state.key}`);
   } catch (error) {
     core.warning(`Gitera Cache: folder save failed (${error.code ?? 'error'}): ${error.message}`);
   } finally {
+    // Never remove the archive while tar may still be writing it.
+    if (packing) await packing.catch(() => {});
     fs.rmSync(archive, { force: true });
   }
 }
