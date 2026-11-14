@@ -12,7 +12,7 @@ const { TokenSource } = require('./lib/token');
 
 const MIB = 1024 * 1024;
 /** Archives that may be bigger than this upload while they are packed (the server's multipart threshold). */
-const STREAM_ABOVE_BYTES = 32 * MIB;
+const STREAM_ABOVE_BYTES = 16 * MIB;
 
 function summary(stats) {
   const lookups = stats.hits + stats.misses;
@@ -62,14 +62,15 @@ async function saveFolder(clientFor, ops) {
     const started = Date.now();
     const client = clientFor(apiUrl);
     const key = cacheKey(state.tool, state.key);
+    let packedAt = null;
+    // tar and zstd start first; the size walk below runs while they work.
+    packing = Promise.resolve(ops.createArchive(paths, archive, state.method)).then(() => {
+      packedAt = Date.now();
+    });
     const bound = ops.archiveBound ? ops.archiveBound(paths) : 0;
     let result;
-    let packedAt = null;
     if (bound > STREAM_ABOVE_BYTES && client.uploadStream) {
       // Upload parts while tar and zstd are still writing the archive.
-      packing = ops.createArchive(paths, archive, state.method).then(() => {
-        packedAt = Date.now();
-      });
       try {
         result = await client.uploadStream(state.tool, key, archive, { name: state.key, maxSizeBytes: bound, packed: packing });
       } catch (error) {
@@ -81,7 +82,7 @@ async function saveFolder(clientFor, ops) {
       await packing;
       core.info(`Gitera Cache: pack and upload ${Date.now() - started} ms (packing ${packedAt - started} ms)`);
     } else {
-      await ops.createArchive(paths, archive, state.method);
+      await packing;
       const packed = Date.now();
       result = await client.upload(state.tool, key, archive, { name: state.key });
       core.info(`Gitera Cache: pack ${packed - started} ms, upload ${Date.now() - packed} ms`);
