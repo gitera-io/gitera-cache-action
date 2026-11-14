@@ -1,0 +1,16 @@
+src/post.js
+  h_75d26f28339534 14-15,60,64-89,96-97
+test/main.test.js
+  h_75d26f28339534 488-553
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "926b37695c8f9f7c81b9cf46276a29055efe6a5e",
+  "prompts": {},
+  "humans": {
+    "h_75d26f28339534": {
+      "author": "Shayki Abramczyk <shayki5@gmail.com>"
+    }
+  }
+}
