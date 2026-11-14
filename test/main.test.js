@@ -487,9 +487,15 @@ describe('folder mode', () => {
     });
 
     const MIB = 1024 * 1024;
-    const streamOps = (bound, calls = []) => ({ ...ops(calls), archiveBound: () => bound });
+    const streamOps = (bound, calls = []) => ({
+      ...ops(calls),
+      archiveBound: () => {
+        calls.push(['bound']);
+        return bound;
+      },
+    });
 
-    it('uploads while packing when the archive may be over 32 MiB', async () => {
+    it('uploads while packing when the archive may be over 16 MiB', async () => {
       setState({});
       const calls = [];
       const streamed = [];
@@ -508,7 +514,8 @@ describe('folder mode', () => {
       assert.equal(streamed[0].tool, 'folder-0123456789abcdef');
       assert.equal(streamed[0].opts.name, 'deps-linux-abc');
       assert.equal(streamed[0].opts.maxSizeBytes, 200 * MIB);
-      assert.deepEqual(calls, [['create', ['/ws/node_modules']]]);
+      // Packing starts first; the size walk runs while tar and zstd work.
+      assert.deepEqual(calls, [['create', ['/ws/node_modules']], ['bound']]);
       assert.match(stdout, /pack and upload \d+ ms/);
       assert.match(stdout, /saved key deps-linux-abc/);
     });
@@ -538,6 +545,23 @@ describe('folder mode', () => {
         assert.match(stdout, /saved key deps-linux-abc/);
       });
     }
+
+    it('streams an archive that may be just over 16 MiB', async () => {
+      setState({});
+      let streamed = false;
+      await post.run({
+        clientFor: () => ({
+          uploadStream: async (tool, key, file, opts) => {
+            await opts.packed;
+            streamed = true;
+            return 'committed';
+          },
+          upload: async () => assert.fail('no plain upload expected'),
+        }),
+        ops: streamOps(17 * MIB),
+      });
+      assert.equal(streamed, true);
+    });
 
     it('keeps the plain upload for archives that fit one PUT', async () => {
       setState({});
