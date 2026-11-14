@@ -90,7 +90,7 @@ describe('createArchive and extractArchive', () => {
 
   it(`packs zstd at level ${ZSTD_LEVEL}`, async (t) => {
     if (compressionMethod() !== 'zstd') return t.skip('zstd not installed');
-    // Text where zstd -3 and -6 give different output.
+    // Text where zstd levels give different output.
     const words = Array.from({ length: 20_000 }, (_, i) => `token${(i * 7919) % 5003} value${(i * 104729) % 997}`).join(' ');
     write(path.join(workspace, 'node_modules/x/data.txt'), words);
     const paths = resolvePaths(['node_modules'], { workspace, home });
@@ -101,7 +101,7 @@ describe('createArchive and extractArchive', () => {
     fs.writeFileSync(list, `${paths.join('\0')}\0`);
     const tar = spawnSync('tar', ['--null', '-P', '-c', '-f', '-', '-T', list]).stdout;
     const at = (level) => spawnSync('zstd', ['-T0', `-${level}`, '-c', '-q'], { input: tar }).stdout.length;
-    assert.notEqual(at(3), at(ZSTD_LEVEL));
+    assert.notEqual(at(ZSTD_LEVEL), at(ZSTD_LEVEL + 3));
     assert.equal(fs.statSync(archive).size, at(ZSTD_LEVEL));
     fs.rmSync(path.join(workspace, 'node_modules'), { recursive: true });
     await extractArchive(archive, 'zstd');

@@ -16,7 +16,11 @@ const { withRetry, NetworkError, defaultSleep } = require('./retry');
 const { putFile, getToFile, getRangeToFile } = require('./transfer');
 
 const MAX_LOOKUP_KEYS = 100;
-const PART_CONCURRENCY = 4;
+/**
+ * Parts in flight. One runner connection to R2 carries about 10 MB/s; a probe
+ * measured 40 MB/s with 4 parts at once and 81-85 MB/s with 16.
+ */
+const PART_CONCURRENCY = 16;
 /**
  * Objects above this are downloaded as parallel byte ranges of this size.
  * Small ranges let an unpack follow the download closely: 8 at a time of
@@ -458,7 +462,9 @@ class CacheClient {
     const sign = async (n) => {
       const last = n === lastNumber();
       // The last part is signed on its own for its real size; others with the next few.
-      const numbers = last ? [n] : [n, n + 1, n + 2, n + 3].filter((m) => m < partCount + 1 && !usable(m) && m !== lastNumber());
+      const numbers = last
+        ? [n]
+        : Array.from({ length: PART_CONCURRENCY }, (_, i) => n + i).filter((m) => m <= partCount && !usable(m) && m !== lastNumber());
       const body = { tool, key, partNumbers: numbers };
       if (last) body.lastPart = { partNumber: n, sizeBytes: sizeOf(n) };
       const result = await this.call('parts', body);

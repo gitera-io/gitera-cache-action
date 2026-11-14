@@ -32,6 +32,9 @@ class Fake {
     this.streaming = true;
     this.partCalls = [];
     this.partPutAt = {};
+    this.partDelay = 0;
+    this.inFlight = 0;
+    this.maxInFlight = 0;
     this.rangeDelay = () => 0;
     this.rangeSentAt = {};
   }
@@ -177,7 +180,14 @@ class Fake {
       this.partPutAt = { ...(this.partPutAt ?? {}), [part]: Date.now() };
       const etag = `"${crypto.createHash('md5').update(raw).digest('hex')}"`;
       obj.upload.set(Number(part), { bytes: raw, etag });
-      return send(200, undefined, { etag });
+      if (!this.partDelay) return send(200, undefined, { etag });
+      // Holds the answer, so parts sent together overlap; counts how many do.
+      this.inFlight += 1;
+      this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+      return setTimeout(() => {
+        this.inFlight -= 1;
+        send(200, undefined, { etag });
+      }, this.partDelay);
     }
     if (req.headers['if-none-match'] !== '*') return send(403);
     if (obj.bytes) return send(412);
@@ -492,6 +502,25 @@ describe('unpack while downloading', () => {
     };
     assert.equal((await big().restore(tool, 'y', [], path.join(dir, 'out'), { extract })).sizeBytes, 3000);
     assert.deepEqual(sink.bytes(), fs.readFileSync(src));
+  });
+});
+
+describe('parts in flight', () => {
+  const tool = 'folder-0123456789abcdef';
+
+  it('sends up to 16 parts at once', async () => {
+    fake.partDelay = 40;
+    fake.firstParts = 32;
+    await client().upload(tool, cacheKey(tool, 'p1'), file(400 * 20), { name: 'p1' });
+    assert.equal(fake.maxInFlight, 16);
+  });
+
+  it('sends up to 16 parts at once while packing', async () => {
+    fake.partDelay = 40;
+    const src = path.join(dir, 'grown');
+    fs.writeFileSync(src, crypto.randomBytes(400 * 20));
+    await client().uploadStream(tool, cacheKey(tool, 'p2'), src, { name: 'p2', maxSizeBytes: 400 * 20, packed: Promise.resolve() });
+    assert.equal(fake.maxInFlight, 16);
   });
 });
 
