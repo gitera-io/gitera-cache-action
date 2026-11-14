@@ -29,6 +29,9 @@ class Fake {
     this.failNext = {}; // route -> [status...]
     this.token = 'cache-1';
     this.nextId = 1;
+    this.streaming = true;
+    this.partCalls = [];
+    this.partPutAt = {};
     this.rangeDelay = () => 0;
     this.rangeSentAt = {};
   }
@@ -93,27 +96,35 @@ class Fake {
       case 'uploads': {
         if (obj?.status === 'committed') return send(200, { status: 'exists' });
         if (obj && obj.owner !== 'me') return send(200, { status: 'in_progress' });
-        const record = obj ?? { status: 'pending', size: body.sizeBytes, bytes: null, upload: null, id: this.nextId++, owner: 'me' };
-        record.size = body.sizeBytes;
+        if (body.maxSizeBytes !== undefined && !this.streaming) return send(400, { code: 'invalid_request' });
+        const size = body.maxSizeBytes ?? body.sizeBytes;
+        const record = obj ?? { status: 'pending', size, bytes: null, upload: null, id: this.nextId++, owner: 'me' };
+        record.size = size;
+        record.signed = new Map();
         if (body.name !== undefined) {
           if (cacheKey(body.tool, body.name) !== body.key) return send(400, { code: 'invalid_request' });
           record.name = body.name;
         }
         this.objects.set(`${body.tool}/${body.key}`, record);
-        if (body.sizeBytes <= this.multipartAbove) {
+        if (body.maxSizeBytes === undefined && body.sizeBytes <= this.multipartAbove) {
           return send(200, { status: 'upload', url: this.url(`/bucket/${record.id}`), expiresAt: '', headers: { 'If-None-Match': '*' } });
         }
         record.upload ??= new Map();
-        const partCount = Math.ceil(body.sizeBytes / this.partSize);
+        const partCount = Math.ceil(size / this.partSize);
         const parts = Array.from({ length: Math.min(this.firstParts, partCount) }, (_, i) => this.partUrl(record, i + 1));
         return send(200, { status: 'multipart', partSizeBytes: this.partSize, partCount, parts });
       }
       case 'parts':
         if (!obj?.upload) return send(404, { code: 'upload_not_found' });
-        return send(200, { parts: body.partNumbers.map((n) => this.partUrl(obj, n)) });
+        this.partCalls = [...(this.partCalls ?? []), body];
+        return send(200, { parts: body.partNumbers.map((n) => this.partUrl(obj, n, body.lastPart?.partNumber === n ? body.lastPart.sizeBytes : undefined)) });
       case 'commit': {
         if (obj?.status === 'committed') return send(200, { status: 'exists' });
         if (!obj) return send(404, { code: 'upload_not_found' });
+        if (body.sizeBytes !== undefined) {
+          if (!obj.upload || body.sizeBytes > obj.size) return send(400, { code: 'invalid_request' });
+          obj.size = body.sizeBytes;
+        }
         if (obj.upload) {
           const sorted = [...body.parts].sort((a, b) => a.partNumber - b.partNumber);
           if (sorted.some((p) => obj.upload.get(p.partNumber)?.etag !== p.etag)) return send(409, { code: 'upload_incomplete' });
@@ -133,12 +144,17 @@ class Fake {
     }
   }
 
-  partUrl(record, n) {
-    return { partNumber: n, url: this.url(`/bucket/${record.id}/part/${n}`), expiresAt: '' };
+  /** Like a signed part URL, bound to one size: the layout's, or `lastSize` when asked. */
+  partUrl(record, n, lastSize) {
+    const count = Math.ceil(record.size / this.partSize);
+    const size = lastSize ?? (n === count ? record.size - this.partSize * (count - 1) : this.partSize);
+    const signedAt = this.nextId++;
+    record.signed.set(`${n}:${signedAt}`, size);
+    return { partNumber: n, url: this.url(`/bucket/${record.id}/part/${n}/${signedAt}`), expiresAt: '' };
   }
 
   bucket(req, res, raw, send) {
-    const [, , id, , part] = req.url.split('/');
+    const [, , id, , part, signedAt] = req.url.split('/');
     const obj = [...this.objects.values()].find((o) => o.id === Number(id));
     if (!obj) return send(404);
     if (req.method === 'GET') {
@@ -155,6 +171,10 @@ class Fake {
       return delay ? setTimeout(reply, delay) : reply();
     }
     if (part) {
+      // A signed part URL only accepts its exact size.
+      const signedSize = obj.signed?.get(`${part}:${signedAt}`);
+      if (signedSize !== undefined && raw.length !== signedSize) return send(403);
+      this.partPutAt = { ...(this.partPutAt ?? {}), [part]: Date.now() };
       const etag = `"${crypto.createHash('md5').update(raw).digest('hex')}"`;
       obj.upload.set(Number(part), { bytes: raw, etag });
       return send(200, undefined, { etag });
@@ -472,6 +492,84 @@ describe('unpack while downloading', () => {
     };
     assert.equal((await big().restore(tool, 'y', [], path.join(dir, 'out'), { extract })).sizeBytes, 3000);
     assert.deepEqual(sink.bytes(), fs.readFileSync(src));
+  });
+});
+
+describe('streaming upload while packing', () => {
+  const tool = 'folder-0123456789abcdef';
+  /** Writes `bytes` to `file` in `chunk`-sized steps, `gap` ms apart; resolves when done. */
+  const grow = async (file, bytes, { chunk = 300, gap = 15 } = {}) => {
+    fs.writeFileSync(file, '');
+    for (let i = 0; i < bytes.length; i += chunk) {
+      await new Promise((resolve) => setTimeout(resolve, gap));
+      fs.appendFileSync(file, bytes.subarray(i, i + chunk));
+    }
+  };
+  const restored = async (name) => {
+    const out = path.join(dir, `out-${name}`);
+    await client().restore(tool, name, [], out);
+    return fs.readFileSync(out);
+  };
+
+  it('uploads parts while the file grows, then commits the real size', async () => {
+    const bytes = crypto.randomBytes(1950);
+    const file = path.join(dir, 'growing');
+    let packedAt = 0;
+    const packed = grow(file, bytes).then(() => {
+      packedAt = Date.now();
+    });
+    const result = await client().uploadStream(tool, cacheKey(tool, 's1'), file, { name: 's1', maxSizeBytes: 4000, packed });
+    assert.equal(result, 'committed');
+    assert.ok(fake.partPutAt[1] < packedAt, 'part 1 went up before packing finished');
+    assert.deepEqual(fake.partCalls.find((c) => c.lastPart)?.lastPart, { partNumber: 5, sizeBytes: 350 });
+    assert.deepEqual(await restored('s1'), bytes);
+  });
+
+  it('handles a final size that is a whole number of parts', async () => {
+    const bytes = crypto.randomBytes(1200);
+    const file = path.join(dir, 'whole');
+    const packed = grow(file, bytes, { chunk: 400 });
+    assert.equal(await client().uploadStream(tool, cacheKey(tool, 's2'), file, { name: 's2', maxSizeBytes: 4000, packed }), 'committed');
+    assert.deepEqual(await restored('s2'), bytes);
+  });
+
+  it('handles an archive smaller than one part', async () => {
+    const bytes = crypto.randomBytes(50);
+    const file = path.join(dir, 'tiny');
+    const packed = grow(file, bytes);
+    assert.equal(await client().uploadStream(tool, cacheKey(tool, 's3'), file, { name: 's3', maxSizeBytes: 4000, packed }), 'committed');
+    assert.deepEqual(await restored('s3'), bytes);
+  });
+
+  it('aborts and throws the packing error when packing fails', async () => {
+    const file = path.join(dir, 'broken');
+    fs.writeFileSync(file, crypto.randomBytes(500));
+    const packed = new Promise((resolve, reject) => setTimeout(() => reject(new Error('tar exited 2')), 30));
+    await assert.rejects(client().uploadStream(tool, cacheKey(tool, 's4'), file, { name: 's4', maxSizeBytes: 4000, packed }), /tar exited 2/);
+    assert.ok(fake.calls.some((c) => c.route === 'abort'));
+  });
+
+  it('reports a server without streaming as a 400, before any upload', async () => {
+    fake.streaming = false;
+    const file = path.join(dir, 'old-server');
+    fs.writeFileSync(file, crypto.randomBytes(500));
+    await assert.rejects(
+      client().uploadStream(tool, cacheKey(tool, 's5'), file, { name: 's5', maxSizeBytes: 4000, packed: Promise.resolve() }),
+      { status: 400 }
+    );
+    assert.ok(!fake.calls.some((c) => c.route.startsWith('bucket')));
+  });
+
+  it('returns exists without uploading when the key is already stored', async () => {
+    await client().upload(tool, cacheKey(tool, 's6'), file(300), { name: 's6' });
+    fake.calls = [];
+    const f = path.join(dir, 'again');
+    fs.writeFileSync(f, crypto.randomBytes(500));
+    assert.equal(
+      await client().uploadStream(tool, cacheKey(tool, 's6'), f, { name: 's6', maxSizeBytes: 4000, packed: Promise.resolve() }),
+      'exists'
+    );
+    assert.ok(!fake.calls.some((c) => c.route.startsWith('bucket')));
   });
 });
 

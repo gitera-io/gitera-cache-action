@@ -1,13 +1,14 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { PassThrough, Readable } = require('node:stream');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 
-const { resolvePaths, folderTool, createArchive, extractArchive, extractStream, compressionMethod } = require('../src/lib/folder');
+const { resolvePaths, folderTool, createArchive, extractArchive, extractStream, compressionMethod, archiveBound } = require('../src/lib/folder');
 const { moveInto } = require('../src/lib/prefetch');
 
 let root;
@@ -135,4 +136,20 @@ describe('createArchive and extractArchive', () => {
   it('refuses to create an empty archive', async () => {
     await assert.rejects(createArchive([], path.join(root, 'x'), 'gzip'), /nothing to cache/);
   });
+
+  for (const method of ['zstd', 'gzip']) {
+    it(`bounds the ${method} archive size from above, even for data that does not compress`, async (t) => {
+      if (method === 'zstd' && compressionMethod() !== 'zstd') return t.skip('zstd not installed');
+      write(path.join(workspace, 'node_modules/a/random.bin'), crypto.randomBytes(300_000));
+      write(path.join(workspace, 'node_modules/a/text.js'), 'x'.repeat(100_000));
+      for (let i = 0; i < 50; i += 1) write(path.join(workspace, `node_modules/many/${'n'.repeat(120)}-${i}.js`), `${i}`);
+      fs.symlinkSync('a/text.js', path.join(workspace, 'node_modules/link.js'));
+      const paths = resolvePaths(['node_modules'], { workspace, home });
+      const archive = path.join(root, `bound.${method}`);
+      await createArchive(paths, archive, method);
+      const bound = archiveBound(paths);
+      assert.ok(bound >= fs.statSync(archive).size, `${bound} >= ${fs.statSync(archive).size}`);
+      assert.ok(bound < 400_000 + 100_000 + 3 * 1024 * 1024, 'not wildly above the input');
+    });
+  }
 });

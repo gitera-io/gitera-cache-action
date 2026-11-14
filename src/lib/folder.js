@@ -66,6 +66,33 @@ function folderTool(patterns, method, platform = process.platform) {
   return `folder-${version.slice(0, 16)}`;
 }
 
+/**
+ * An upper bound on the archive createArchive makes from `paths`, without
+ * packing: every tar header and data block, a long-name header per entry,
+ * then 1% and 1 MiB on top for zstd or gzip frames on data that does not
+ * compress. Symlinks are not followed, as in tar.
+ */
+function archiveBound(paths) {
+  const BLOCK = 512;
+  const blocks = (bytes) => Math.ceil(bytes / BLOCK) * BLOCK;
+  let total = 20 * BLOCK; // end-of-archive blocks and record padding
+  const visit = (file) => {
+    let stat;
+    try {
+      stat = fs.lstatSync(file);
+    } catch {
+      return;
+    }
+    // Header, plus a long-name (or pax) header and its name blocks.
+    total += 2 * BLOCK + blocks(Buffer.byteLength(file) + 1);
+    if (stat.isFile()) total += blocks(stat.size);
+    else if (stat.isSymbolicLink()) total += blocks(Buffer.byteLength(fs.readlinkSync(file)) + 1);
+    else if (stat.isDirectory()) for (const name of fs.readdirSync(file)) visit(path.join(file, name));
+  };
+  for (const p of paths) visit(p);
+  return Math.ceil(total * 1.01) + 1024 * 1024;
+}
+
 /** Writes `paths` into a compressed tar at `archivePath`. */
 async function createArchive(paths, archivePath, method) {
   if (paths.length === 0) throw new Error('nothing to cache: no path matched');
@@ -163,4 +190,4 @@ function unpack(method, archivePath, input, root) {
   });
 }
 
-module.exports = { resolvePaths, compressionMethod, folderTool, createArchive, extractArchive, extractStream };
+module.exports = { resolvePaths, compressionMethod, folderTool, createArchive, extractArchive, extractStream, archiveBound };
