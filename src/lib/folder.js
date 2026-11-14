@@ -53,13 +53,13 @@ function resolvePaths(patterns, { workspace = process.env.GITHUB_WORKSPACE || pr
 }
 
 /**
- * zstd level for saving. Measured on ubuntu-latest (2 cores) with a 462 MB
- * node_modules tar, alone: -1 gives 117 MB in 1.1-1.2 s, -3 gives 99 MB in
- * 1.4-2.1 s, -6 gives 90 MB in 2.4-3.2 s. A streaming save uploads 16 parts
- * at once (~80 MB/s) while it packs, so packing on the shared cores is the
- * slow part, not the size: -1 packs fastest. Restores read any level.
+ * zstd level for saving. Measured on ubuntu-latest (2 cores), bench
+ * node_modules (462 MB tar): -1 gives 117 MB in 1.1-1.2 s, -3 gives 99 MB in
+ * 1.4-2.1 s, -6 gives 90 MB in 2.4-3.2 s (alone). In side-by-side runs, -1
+ * saved ~0.5 s but its bigger archive made restores ~0.9 s slower, and -6
+ * made saves slower, so -3 stays. Restores read any level.
  */
-const ZSTD_LEVEL = 1;
+const ZSTD_LEVEL = 3;
 
 /** zstd when the runner has it, else gzip. */
 function compressionMethod() {
