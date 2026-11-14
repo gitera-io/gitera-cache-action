@@ -16,7 +16,11 @@ const { withRetry, NetworkError, defaultSleep } = require('./retry');
 const { putFile, getToFile, getRangeToFile } = require('./transfer');
 
 const MAX_LOOKUP_KEYS = 100;
-const PART_CONCURRENCY = 4;
+/**
+ * Parts in flight. One runner connection to R2 carries about 10 MB/s; a probe
+ * measured 40 MB/s with 4 parts at once and 81-85 MB/s with 16.
+ */
+const PART_CONCURRENCY = 16;
 /**
  * Objects above this are downloaded as parallel byte ranges of this size.
  * Small ranges let an unpack follow the download closely: 8 at a time of
@@ -25,6 +29,8 @@ const PART_CONCURRENCY = 4;
 const RANGE_BYTES = 4 * 1024 * 1024;
 const RANGE_CONCURRENCY = 8;
 const URL_REFRESH_MS = 45 * 1000;
+/** How often a streaming upload checks whether the next part is on disk. */
+const GROW_POLL_MS = 25;
 const REQUEST_TIMEOUT_MS = 30 * 1000;
 const FOLLOW_CHUNK = 1024 * 1024;
 
@@ -388,6 +394,126 @@ class CacheClient {
     });
     await Promise.all(workers);
     return pending.map((n) => ({ partNumber: n, etag: etags.get(n) }));
+  }
+
+  /**
+   * Uploads a file that is still being written (an archive being packed), as
+   * a streaming multipart upload: `maxSizeBytes` is reserved, each part goes
+   * up as soon as its bytes are on disk, and when `packed` resolves the real
+   * size is sent with the commit. Returns like `upload`. Throws the packing
+   * error if `packed` rejects. A server without streaming answers 400 before
+   * anything is uploaded; the caller can then pack fully and use `upload`.
+   */
+  async uploadStream(tool, key, filePath, { name, maxSizeBytes, packed }) {
+    // Consumed here at once, so a packing failure is never an unhandled rejection.
+    const packing = { done: false, error: null };
+    const settled = Promise.resolve(packed).then(
+      () => {
+        packing.done = true;
+      },
+      (error) => {
+        packing.error = error;
+      }
+    );
+    const reserve = name === undefined ? { tool, key, maxSizeBytes } : { tool, key, maxSizeBytes, name };
+    const start = await this.call('uploads', reserve);
+    if (start.status === 'exists' || start.status === 'in_progress') return start.status;
+    try {
+      if (start.status !== 'multipart') throw new CacheApiError(`Unexpected upload status ${start.status}`, 'bad_response');
+      const { parts, sizeBytes } = await this.putGrowingParts(tool, key, filePath, maxSizeBytes, start, packing, settled);
+      const done = await this.call('commit', { tool, key, parts, sizeBytes });
+      return done.status;
+    } catch (error) {
+      await this.call('abort', { tool, key }).catch(() => {});
+      throw error;
+    }
+  }
+
+  async putGrowingParts(tool, key, filePath, maxSizeBytes, start, packing, settled) {
+    const { partSizeBytes, partCount } = start;
+    const now = () => Date.now();
+    // The size the server signed each URL for: full parts, except its layout's last one.
+    const layoutSize = (n) => (n === partCount ? maxSizeBytes - partSizeBytes * (partCount - 1) : partSizeBytes);
+    const urls = new Map(start.parts.map((p) => [p.partNumber, { url: p.url, at: now(), size: layoutSize(p.partNumber) }]));
+    const etags = new Map();
+    let finalSize = null;
+    const lastNumber = () => (finalSize === null ? null : Math.max(1, Math.ceil(finalSize / partSizeBytes)));
+    const sizeOf = (n) => (n === lastNumber() ? finalSize - partSizeBytes * (n - 1) : partSizeBytes);
+    const known = () => {
+      if (packing.error) throw packing.error;
+      if (packing.done && finalSize === null) finalSize = fs.statSync(filePath).size;
+      return finalSize;
+    };
+
+    /** Waits until part `n` is on disk; false when the archive ended before it. */
+    const ready = async (n) => {
+      for (;;) {
+        if (known() !== null) return n <= lastNumber();
+        if (fs.statSync(filePath).size >= n * partSizeBytes) return true;
+        // A real timer, not this.sleep: the file only grows while time passes.
+        await Promise.race([new Promise((resolve) => setTimeout(resolve, GROW_POLL_MS)), settled]);
+      }
+    };
+
+    const usable = (n) => {
+      const entry = urls.get(n);
+      return entry && now() - entry.at < URL_REFRESH_MS && entry.size === sizeOf(n);
+    };
+    const sign = async (n) => {
+      const last = n === lastNumber();
+      // The last part is signed on its own for its real size; others with the next few.
+      const numbers = last
+        ? [n]
+        : Array.from({ length: PART_CONCURRENCY }, (_, i) => n + i).filter((m) => m <= partCount && !usable(m) && m !== lastNumber());
+      const body = { tool, key, partNumbers: numbers };
+      if (last) body.lastPart = { partNumber: n, sizeBytes: sizeOf(n) };
+      const result = await this.call('parts', body);
+      for (const p of result.parts) {
+        urls.set(p.partNumber, { url: p.url, at: now(), size: last ? sizeOf(n) : layoutSize(p.partNumber) });
+      }
+    };
+
+    const sendPart = async (n) => {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        if (!usable(n)) await sign(n);
+        let result;
+        try {
+          result = await withRetry(
+            `Bucket part ${n}`,
+            () => this.transfer.putFile(urls.get(n).url, { filePath, start: (n - 1) * partSizeBytes, length: sizeOf(n) }),
+            { sleep: this.sleep }
+          );
+        } catch {
+          urls.delete(n);
+          continue;
+        }
+        const etag = result.headers?.etag;
+        if (result.status === 200 && etag) return etags.set(n, etag);
+        urls.delete(n); // expired or refused: sign again
+      }
+      throw new CacheApiError(`Bucket part ${n} could not be uploaded`, 'upload_failed');
+    };
+
+    let next = 1;
+    let failure = null;
+    const worker = async () => {
+      while (!failure) {
+        const n = next;
+        next += 1;
+        try {
+          if (n > partCount || !(await ready(n))) return;
+          await sendPart(n);
+        } catch (error) {
+          failure ??= error;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: PART_CONCURRENCY }, worker));
+    if (failure) throw failure;
+    await settled;
+    if (known() > maxSizeBytes) throw new CacheApiError('The archive grew past its reserved size', 'too_large');
+    const count = lastNumber();
+    return { parts: Array.from({ length: count }, (_, i) => ({ partNumber: i + 1, etag: etags.get(i + 1) })), sizeBytes: finalSize };
   }
 }
 

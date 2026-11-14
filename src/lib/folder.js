@@ -52,6 +52,15 @@ function resolvePaths(patterns, { workspace = process.env.GITHUB_WORKSPACE || pr
   return [...found].sort();
 }
 
+/**
+ * zstd level for saving. Measured on ubuntu-latest (2 cores) with a 462 MB
+ * node_modules tar: -3 gives 99 MB in 1.4-2.1 s, -6 gives 90 MB in 2.4-3.2 s
+ * alone. While the same save uploads, -6 packed in 3.1-6.7 s (two cores
+ * shared with the upload) and made the save slower overall, so -3 stays.
+ * Restores read any level.
+ */
+const ZSTD_LEVEL = 3;
+
 /** zstd when the runner has it, else gzip. */
 function compressionMethod() {
   return spawnSync('zstd', ['--version'], { stdio: 'ignore' }).status === 0 ? 'zstd' : 'gzip';
@@ -66,6 +75,33 @@ function folderTool(patterns, method, platform = process.platform) {
   return `folder-${version.slice(0, 16)}`;
 }
 
+/**
+ * An upper bound on the archive createArchive makes from `paths`, without
+ * packing: every tar header and data block, a long-name header per entry,
+ * then 1% and 1 MiB on top for zstd or gzip frames on data that does not
+ * compress. Symlinks are not followed, as in tar.
+ */
+function archiveBound(paths) {
+  const BLOCK = 512;
+  const blocks = (bytes) => Math.ceil(bytes / BLOCK) * BLOCK;
+  let total = 20 * BLOCK; // end-of-archive blocks and record padding
+  const visit = (file) => {
+    let stat;
+    try {
+      stat = fs.lstatSync(file);
+    } catch {
+      return;
+    }
+    // Header, plus a long-name (or pax) header and its name blocks.
+    total += 2 * BLOCK + blocks(Buffer.byteLength(file) + 1);
+    if (stat.isFile()) total += blocks(stat.size);
+    else if (stat.isSymbolicLink()) total += blocks(Buffer.byteLength(fs.readlinkSync(file)) + 1);
+    else if (stat.isDirectory()) for (const name of fs.readdirSync(file)) visit(path.join(file, name));
+  };
+  for (const p of paths) visit(p);
+  return Math.ceil(total * 1.01) + 1024 * 1024;
+}
+
 /** Writes `paths` into a compressed tar at `archivePath`. */
 async function createArchive(paths, archivePath, method) {
   if (paths.length === 0) throw new Error('nothing to cache: no path matched');
@@ -74,7 +110,7 @@ async function createArchive(paths, archivePath, method) {
   fs.writeFileSync(list, `${paths.join('\0')}\0`);
   try {
     const tarArgs = ['--null', '-P', '-c', '-f', '-', '-T', list];
-    const compress = method === 'zstd' ? ['zstd', ['-T0', '-q', '-o', archivePath, '-']] : ['gzip', ['-c']];
+    const compress = method === 'zstd' ? ['zstd', ['-T0', `-${ZSTD_LEVEL}`, '-q', '-o', archivePath, '-']] : ['gzip', ['-c']];
     const out = method === 'zstd' ? null : fs.createWriteStream(archivePath);
     await new Promise((resolve, reject) => {
       const tar = spawn('tar', tarArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -163,4 +199,4 @@ function unpack(method, archivePath, input, root) {
   });
 }
 
-module.exports = { resolvePaths, compressionMethod, folderTool, createArchive, extractArchive, extractStream };
+module.exports = { resolvePaths, compressionMethod, folderTool, createArchive, extractArchive, extractStream, archiveBound, ZSTD_LEVEL };

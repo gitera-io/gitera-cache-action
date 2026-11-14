@@ -1,13 +1,15 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { PassThrough, Readable } = require('node:stream');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 
-const { resolvePaths, folderTool, createArchive, extractArchive, extractStream, compressionMethod } = require('../src/lib/folder');
+const { resolvePaths, folderTool, createArchive, extractArchive, extractStream, compressionMethod, archiveBound, ZSTD_LEVEL } = require('../src/lib/folder');
 const { moveInto } = require('../src/lib/prefetch');
 
 let root;
@@ -86,6 +88,26 @@ describe('createArchive and extractArchive', () => {
     await assert.rejects(extractArchive(bad, 'gzip'));
   });
 
+  it(`packs zstd at level ${ZSTD_LEVEL}`, async (t) => {
+    if (compressionMethod() !== 'zstd') return t.skip('zstd not installed');
+    // Text where zstd levels give different output.
+    const words = Array.from({ length: 20_000 }, (_, i) => `token${(i * 7919) % 5003} value${(i * 104729) % 997}`).join(' ');
+    write(path.join(workspace, 'node_modules/x/data.txt'), words);
+    const paths = resolvePaths(['node_modules'], { workspace, home });
+    const archive = path.join(root, 'level.zst');
+    await createArchive(paths, archive, 'zstd');
+    // The same tar stream createArchive makes, compressed by hand at each level.
+    const list = path.join(root, 'list');
+    fs.writeFileSync(list, `${paths.join('\0')}\0`);
+    const tar = spawnSync('tar', ['--null', '-P', '-c', '-f', '-', '-T', list]).stdout;
+    const at = (level) => spawnSync('zstd', ['-T0', `-${level}`, '-c', '-q'], { input: tar }).stdout.length;
+    assert.notEqual(at(ZSTD_LEVEL), at(ZSTD_LEVEL + 3));
+    assert.equal(fs.statSync(archive).size, at(ZSTD_LEVEL));
+    fs.rmSync(path.join(workspace, 'node_modules'), { recursive: true });
+    await extractArchive(archive, 'zstd');
+    assert.equal(fs.readFileSync(path.join(workspace, 'node_modules/x/data.txt'), 'utf8'), words);
+  });
+
   for (const method of ['zstd', 'gzip']) {
     it(`unpacks from a stream that arrives in small pieces with ${method}`, async (t) => {
       if (method === 'zstd' && compressionMethod() !== 'zstd') return t.skip('zstd not installed');
@@ -135,4 +157,20 @@ describe('createArchive and extractArchive', () => {
   it('refuses to create an empty archive', async () => {
     await assert.rejects(createArchive([], path.join(root, 'x'), 'gzip'), /nothing to cache/);
   });
+
+  for (const method of ['zstd', 'gzip']) {
+    it(`bounds the ${method} archive size from above, even for data that does not compress`, async (t) => {
+      if (method === 'zstd' && compressionMethod() !== 'zstd') return t.skip('zstd not installed');
+      write(path.join(workspace, 'node_modules/a/random.bin'), crypto.randomBytes(300_000));
+      write(path.join(workspace, 'node_modules/a/text.js'), 'x'.repeat(100_000));
+      for (let i = 0; i < 50; i += 1) write(path.join(workspace, `node_modules/many/${'n'.repeat(120)}-${i}.js`), `${i}`);
+      fs.symlinkSync('a/text.js', path.join(workspace, 'node_modules/link.js'));
+      const paths = resolvePaths(['node_modules'], { workspace, home });
+      const archive = path.join(root, `bound.${method}`);
+      await createArchive(paths, archive, method);
+      const bound = archiveBound(paths);
+      assert.ok(bound >= fs.statSync(archive).size, `${bound} >= ${fs.statSync(archive).size}`);
+      assert.ok(bound < 400_000 + 100_000 + 3 * 1024 * 1024, 'not wildly above the input');
+    });
+  }
 });
