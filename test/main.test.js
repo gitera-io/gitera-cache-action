@@ -485,5 +485,71 @@ describe('folder mode', () => {
       assert.match(stdout, /::warning::Gitera Cache: folder save failed \(quota_exceeded\)/);
       assert.equal(process.exitCode, undefined);
     });
+
+    const MIB = 1024 * 1024;
+    const streamOps = (bound, calls = []) => ({ ...ops(calls), archiveBound: () => bound });
+
+    it('uploads while packing when the archive may be over 32 MiB', async () => {
+      setState({});
+      const calls = [];
+      const streamed = [];
+      await post.run({
+        clientFor: () => ({
+          uploadStream: async (tool, key, file, opts) => {
+            streamed.push({ tool, opts });
+            await opts.packed;
+            assert.equal(fs.readFileSync(file, 'utf8'), 'archive');
+            return 'committed';
+          },
+          upload: async () => assert.fail('no plain upload expected'),
+        }),
+        ops: streamOps(200 * MIB, calls),
+      });
+      assert.equal(streamed[0].tool, 'folder-0123456789abcdef');
+      assert.equal(streamed[0].opts.name, 'deps-linux-abc');
+      assert.equal(streamed[0].opts.maxSizeBytes, 200 * MIB);
+      assert.deepEqual(calls, [['create', ['/ws/node_modules']]]);
+      assert.match(stdout, /pack and upload \d+ ms/);
+      assert.match(stdout, /saved key deps-linux-abc/);
+    });
+
+    for (const [label, status] of [
+      ['a server without streaming', 400],
+      ['a bound over the object limit', 413],
+      ['a bound over the quota', 507],
+    ]) {
+      it(`packs first and uploads the old way after ${label}`, async () => {
+        setState({});
+        let uploaded = false;
+        await post.run({
+          clientFor: () => ({
+            uploadStream: async () => {
+              throw Object.assign(new Error('refused'), { code: 'x', status });
+            },
+            upload: async (tool, key, file) => {
+              assert.equal(fs.readFileSync(file, 'utf8'), 'archive');
+              uploaded = true;
+              return 'committed';
+            },
+          }),
+          ops: streamOps(200 * MIB),
+        });
+        assert.equal(uploaded, true);
+        assert.match(stdout, /saved key deps-linux-abc/);
+      });
+    }
+
+    it('keeps the plain upload for archives that fit one PUT', async () => {
+      setState({});
+      let uploaded = false;
+      await post.run({
+        clientFor: () => ({
+          uploadStream: async () => assert.fail('no stream expected'),
+          upload: async () => (uploaded = true) && 'committed',
+        }),
+        ops: streamOps(10 * MIB),
+      });
+      assert.equal(uploaded, true);
+    });
   });
 });
