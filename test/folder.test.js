@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -8,7 +9,7 @@ const path = require('node:path');
 const { PassThrough, Readable } = require('node:stream');
 const { afterEach, beforeEach, describe, it } = require('node:test');
 
-const { resolvePaths, folderTool, createArchive, extractArchive, extractStream, compressionMethod, archiveBound } = require('../src/lib/folder');
+const { resolvePaths, folderTool, createArchive, extractArchive, extractStream, compressionMethod, archiveBound, ZSTD_LEVEL } = require('../src/lib/folder');
 const { moveInto } = require('../src/lib/prefetch');
 
 let root;
@@ -85,6 +86,26 @@ describe('createArchive and extractArchive', () => {
     const bad = path.join(root, 'bad.gzip');
     fs.writeFileSync(bad, 'not an archive');
     await assert.rejects(extractArchive(bad, 'gzip'));
+  });
+
+  it(`packs zstd at level ${ZSTD_LEVEL}`, async (t) => {
+    if (compressionMethod() !== 'zstd') return t.skip('zstd not installed');
+    // Text where zstd -3 and -6 give different output.
+    const words = Array.from({ length: 20_000 }, (_, i) => `token${(i * 7919) % 5003} value${(i * 104729) % 997}`).join(' ');
+    write(path.join(workspace, 'node_modules/x/data.txt'), words);
+    const paths = resolvePaths(['node_modules'], { workspace, home });
+    const archive = path.join(root, 'level.zst');
+    await createArchive(paths, archive, 'zstd');
+    // The same tar stream createArchive makes, compressed by hand at each level.
+    const list = path.join(root, 'list');
+    fs.writeFileSync(list, `${paths.join('\0')}\0`);
+    const tar = spawnSync('tar', ['--null', '-P', '-c', '-f', '-', '-T', list]).stdout;
+    const at = (level) => spawnSync('zstd', ['-T0', `-${level}`, '-c', '-q'], { input: tar }).stdout.length;
+    assert.notEqual(at(3), at(ZSTD_LEVEL));
+    assert.equal(fs.statSync(archive).size, at(ZSTD_LEVEL));
+    fs.rmSync(path.join(workspace, 'node_modules'), { recursive: true });
+    await extractArchive(archive, 'zstd');
+    assert.equal(fs.readFileSync(path.join(workspace, 'node_modules/x/data.txt'), 'utf8'), words);
   });
 
   for (const method of ['zstd', 'gzip']) {
